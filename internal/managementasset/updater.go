@@ -34,6 +34,11 @@ const (
 	maxAssetDownloadSize         = 50 << 20 // 10 MB safety limit for management asset downloads
 )
 
+var branchAssetCandidates = []string{
+	managementAssetName,
+	"dist/" + managementAssetName,
+}
+
 // ManagementFileName exposes the control panel asset filename.
 const ManagementFileName = managementAssetName
 
@@ -96,7 +101,13 @@ func runAutoUpdater(ctx context.Context) {
 
 		configPath, _ := schedulerConfigPath.Load().(string)
 		staticDir := StaticDir(configPath)
-		EnsureLatestManagementHTML(ctx, staticDir, cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository)
+		EnsureLatestManagementHTML(
+			ctx,
+			staticDir,
+			cfg.ProxyURL,
+			cfg.RemoteManagement.PanelGitHubRepository,
+			cfg.RemoteManagement.PanelGitHubBranch,
+		)
 	}
 
 	runOnce()
@@ -177,9 +188,15 @@ func FilePath(configFilePath string) string {
 	return filepath.Join(dir, ManagementFileName)
 }
 
-// EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
+type managementAssetSource struct {
+	DownloadURL string
+	RemoteHash  string
+	Label       string
+}
+
+// EnsureLatestManagementHTML checks the configured management asset source and updates the local copy when needed.
 // It coalesces concurrent sync attempts and returns whether the asset exists after the sync attempt.
-func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string) bool {
+func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string, panelBranch string) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -221,7 +238,6 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 			return nil, nil
 		}
 
-		releaseURL := resolveReleaseURL(panelRepository)
 		client := newHTTPClient(proxyURL)
 
 		localHash, err := fileSHA256(localPath)
@@ -232,25 +248,25 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 			localHash = ""
 		}
 
-		asset, remoteHash, err := fetchLatestAsset(ctx, client, releaseURL)
+		source, err := resolveManagementAssetSource(ctx, client, panelRepository, panelBranch)
 		if err != nil {
 			if localFileMissing {
-				log.WithError(err).Warn("failed to fetch latest management release information, trying fallback page")
+				log.WithError(err).Warn("failed to fetch management control panel source, trying fallback page")
 				if ensureFallbackManagementHTML(ctx, client, localPath) {
 					return nil, nil
 				}
 				return nil, nil
 			}
-			log.WithError(err).Warn("failed to fetch latest management release information")
+			log.WithError(err).Warn("failed to fetch management control panel source")
 			return nil, nil
 		}
 
-		if remoteHash != "" && localHash != "" && strings.EqualFold(remoteHash, localHash) {
+		if source.RemoteHash != "" && localHash != "" && strings.EqualFold(source.RemoteHash, localHash) {
 			log.Debug("management asset is already up to date")
 			return nil, nil
 		}
 
-		data, downloadedHash, err := downloadAsset(ctx, client, asset.BrowserDownloadURL)
+		data, downloadedHash, err := downloadAsset(ctx, client, source.DownloadURL)
 		if err != nil {
 			if localFileMissing {
 				log.WithError(err).Warn("failed to download management asset, trying fallback page")
@@ -263,8 +279,8 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 			return nil, nil
 		}
 
-		if remoteHash != "" && !strings.EqualFold(remoteHash, downloadedHash) {
-			log.Errorf("management asset digest mismatch: expected %s got %s — aborting update for safety", remoteHash, downloadedHash)
+		if source.RemoteHash != "" && !strings.EqualFold(source.RemoteHash, downloadedHash) {
+			log.Errorf("management asset digest mismatch: expected %s got %s — aborting update for safety", source.RemoteHash, downloadedHash)
 			return nil, nil
 		}
 
@@ -273,12 +289,33 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 			return nil, nil
 		}
 
-		log.Infof("management asset updated successfully (hash=%s)", downloadedHash)
+		if source.Label != "" {
+			log.Infof("management asset updated successfully from %s (hash=%s)", source.Label, downloadedHash)
+		} else {
+			log.Infof("management asset updated successfully (hash=%s)", downloadedHash)
+		}
 		return nil, nil
 	})
 
 	_, err := os.Stat(localPath)
 	return err == nil
+}
+
+func resolveManagementAssetSource(ctx context.Context, client *http.Client, panelRepository string, panelBranch string) (*managementAssetSource, error) {
+	if strings.TrimSpace(panelBranch) != "" {
+		downloadURL, label, err := resolveBranchAssetURL(ctx, client, panelRepository, panelBranch)
+		if err != nil {
+			return nil, err
+		}
+		return &managementAssetSource{DownloadURL: downloadURL, Label: label}, nil
+	}
+
+	releaseURL := resolveReleaseURL(panelRepository)
+	asset, remoteHash, err := fetchLatestAsset(ctx, client, releaseURL)
+	if err != nil {
+		return nil, err
+	}
+	return &managementAssetSource{DownloadURL: asset.BrowserDownloadURL, RemoteHash: remoteHash, Label: "GitHub release"}, nil
 }
 
 func ensureFallbackManagementHTML(ctx context.Context, client *http.Client, localPath string) bool {
@@ -330,6 +367,83 @@ func resolveReleaseURL(repo string) string {
 	}
 
 	return defaultManagementReleaseURL
+}
+
+func resolveBranchAssetURL(ctx context.Context, client *http.Client, repo string, branch string) (string, string, error) {
+	owner, repoName, err := parseGitHubRepo(repo)
+	if err != nil {
+		return "", "", err
+	}
+
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return "", "", fmt.Errorf("empty panel branch")
+	}
+
+	for _, candidate := range branchAssetCandidates {
+		downloadURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repoName, url.PathEscape(branch), candidate)
+		ok, errHead := remoteAssetExists(ctx, client, downloadURL)
+		if errHead != nil {
+			continue
+		}
+		if ok {
+			return downloadURL, fmt.Sprintf("branch %s (%s)", branch, candidate), nil
+		}
+	}
+
+	return "", "", fmt.Errorf("management asset not found on branch %s; expected one of: %s", branch, strings.Join(branchAssetCandidates, ", "))
+}
+
+func parseGitHubRepo(repo string) (string, string, error) {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		repo = config.DefaultPanelGitHubRepository
+	}
+
+	parsed, err := url.Parse(repo)
+	if err != nil || parsed.Host == "" {
+		return "", "", fmt.Errorf("invalid panel repository: %q", repo)
+	}
+
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	host := strings.ToLower(parsed.Host)
+	switch host {
+	case "github.com":
+		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
+			return parts[0], strings.TrimSuffix(parts[1], ".git"), nil
+		}
+	case "api.github.com":
+		if len(parts) >= 3 && parts[0] == "repos" && parts[1] != "" && parts[2] != "" {
+			return parts[1], strings.TrimSuffix(parts[2], ".git"), nil
+		}
+	}
+
+	return "", "", fmt.Errorf("unsupported panel repository URL: %q", repo)
+}
+
+func remoteAssetExists(ctx context.Context, client *http.Client, downloadURL string) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, downloadURL, nil)
+	if err != nil {
+		return false, fmt.Errorf("create branch asset request: %w", err)
+	}
+	req.Header.Set("User-Agent", httpUserAgent)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("execute branch asset request: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode == http.StatusOK {
+		return true, nil
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+
+	return false, fmt.Errorf("unexpected branch asset status %d", resp.StatusCode)
 }
 
 func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {

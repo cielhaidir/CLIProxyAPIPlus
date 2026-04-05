@@ -201,6 +201,9 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+	// PanelGitHubBranch switches panel updates from GitHub releases to a branch-backed file lookup.
+	// When set, the updater fetches management.html (or dist/management.html) from the selected branch.
+	PanelGitHubBranch string `yaml:"panel-github-branch"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
@@ -678,6 +681,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.RemoteManagement.PanelGitHubRepository == "" {
 		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	}
+	cfg.RemoteManagement.PanelGitHubBranch = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubBranch)
 
 	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)
 	if cfg.Pprof.Addr == "" {

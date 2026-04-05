@@ -32,6 +32,11 @@ remote-management:
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
   panel-github-repository: 'https://github.com/router-for-me/Cli-Proxy-API-Management-Center'
 
+  # Optional branch override for the management control panel source.
+  # When set, the proxy downloads management.html from that branch instead of the latest release.
+  # It checks branch paths in this order: management.html, then dist/management.html.
+  # panel-github-branch: 'dev'
+
 # Authentication directory (supports ~ for home directory)
 auth-dir: '~/.cli-proxy-api'
 
