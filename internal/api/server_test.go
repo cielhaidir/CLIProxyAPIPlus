@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	gin "github.com/gin-gonic/gin"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -30,7 +32,7 @@ func newTestServer(t *testing.T) *Server {
 
 	cfg := &proxyconfig.Config{
 		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"test-key"},
+			APIKeys: []sdkconfig.ClientAPIKey{{Key: "test-key"}},
 		},
 		Port:                   0,
 		AuthDir:                authDir,
@@ -42,6 +44,34 @@ func newTestServer(t *testing.T) *Server {
 	authManager := auth.NewManager(nil, nil, nil)
 	accessManager := sdkaccess.NewManager()
 
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	return NewServer(cfg, authManager, accessManager, configPath)
+}
+
+func newManagedKeyTestServer(t *testing.T, entry sdkconfig.ClientAPIKey) *Server {
+	t.Helper()
+
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+
+	cfg := &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeys: []sdkconfig.ClientAPIKey{entry},
+		},
+		Port:                   0,
+		AuthDir:                authDir,
+		Debug:                  true,
+		LoggingToFile:          false,
+		UsageStatisticsEnabled: false,
+	}
+
+	authManager := auth.NewManager(nil, nil, nil)
+	accessManager := sdkaccess.NewManager()
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	return NewServer(cfg, authManager, accessManager, configPath)
 }
@@ -206,5 +236,129 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
 			t.Fatalf("unexpected forced error log in config dir %s", configLogsDir)
 		}
+	}
+}
+
+func TestClientAPIKeyFiltersModels(t *testing.T) {
+	allowedModel := fmt.Sprintf("allowed-openai-%d", time.Now().UnixNano())
+	blockedModel := fmt.Sprintf("blocked-openai-%d", time.Now().UnixNano())
+	registry.GetGlobalRegistry().RegisterClient("test-openai-client-1-"+allowedModel, "openai", []*registry.ModelInfo{{ID: allowedModel, Created: 1}})
+	registry.GetGlobalRegistry().RegisterClient("test-openai-client-2-"+blockedModel, "openai", []*registry.ModelInfo{{ID: blockedModel, Created: 1}})
+
+	enabled := true
+	server := newManagedKeyTestServer(t, sdkconfig.ClientAPIKey{
+		Key:           "test-key",
+		Enabled:       &enabled,
+		Currency:      "USD",
+		CreditBalance: 100,
+		AllowedModels: []string{allowedModel},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, allowedModel) {
+		t.Fatalf("expected allowed model in response, body=%s", body)
+	}
+	if strings.Contains(body, blockedModel) {
+		t.Fatalf("expected blocked model to be filtered out, body=%s", body)
+	}
+}
+
+func TestDisabledClientAPIKeyRejected(t *testing.T) {
+	disabled := false
+	server := newManagedKeyTestServer(t, sdkconfig.ClientAPIKey{
+		Key:           "test-key",
+		Enabled:       &disabled,
+		Currency:      "USD",
+		CreditBalance: 100,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "api key disabled") {
+		t.Fatalf("expected disabled message, got %s", rr.Body.String())
+	}
+}
+
+func TestZeroBalanceClientAPIKeyRejected(t *testing.T) {
+	enabled := true
+	server := newManagedKeyTestServer(t, sdkconfig.ClientAPIKey{
+		Key:           "test-key",
+		Enabled:       &enabled,
+		Currency:      "USD",
+		CreditBalance: 0,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "insufficient credit balance") {
+		t.Fatalf("expected balance message, got %s", rr.Body.String())
+	}
+}
+
+func TestUnauthorizedModelRejectedOnInferenceEndpoints(t *testing.T) {
+	enabled := true
+	server := newManagedKeyTestServer(t, sdkconfig.ClientAPIKey{
+		Key:           "test-key",
+		Enabled:       &enabled,
+		Currency:      "USD",
+		CreditBalance: 100,
+		AllowedModels: []string{"allowed-model"},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"blocked-model","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "model not allowed for this api key") {
+		t.Fatalf("expected model restriction message, got %s", rr.Body.String())
+	}
+}
+
+func TestUnauthorizedGeminiModelRejected(t *testing.T) {
+	enabled := true
+	server := newManagedKeyTestServer(t, sdkconfig.ClientAPIKey{
+		Key:           "test-key",
+		Enabled:       &enabled,
+		Currency:      "USD",
+		CreditBalance: 100,
+		AllowedModels: []string{"allowed-gemini"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1beta/models/blocked-gemini", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "model not allowed for this api key") {
+		t.Fatalf("expected model restriction message, got %s", rr.Body.String())
 	}
 }

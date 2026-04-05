@@ -5,10 +5,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -25,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/billing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
@@ -38,6 +41,7 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"gopkg.in/yaml.v3"
 )
 
@@ -157,7 +161,8 @@ type Server struct {
 	wsAuthEnabled atomic.Bool
 
 	// management handler
-	mgmt *managementHandlers.Handler
+	mgmt           *managementHandlers.Handler
+	billingManager *billing.Manager
 
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.AmpModule
@@ -253,6 +258,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		envManagementSecret: envManagementSecret,
 		wsRoutes:            make(map[string]struct{}),
 	}
+	s.billingManager = billing.NewManager(cfg, configFilePath)
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
@@ -264,6 +270,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+	s.mgmt.SetBillingManager(s.billingManager)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
@@ -333,24 +340,26 @@ func (s *Server) setupRoutes() {
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
 	v1.Use(AuthMiddleware(s.accessManager))
+	v1.Use(s.clientAPIKeyAuthorizationMiddleware())
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
-		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
-		v1.POST("/completions", openaiHandlers.Completions)
-		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
-		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
+		v1.POST("/chat/completions", s.requireAuthorizedModelFromBody(openaiHandlers.ChatCompletions))
+		v1.POST("/completions", s.requireAuthorizedModelFromBody(openaiHandlers.Completions))
+		v1.POST("/messages", s.requireAuthorizedModelFromBody(claudeCodeHandlers.ClaudeMessages))
+		v1.POST("/messages/count_tokens", s.requireAuthorizedModelFromBody(claudeCodeHandlers.ClaudeCountTokens))
 		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
-		v1.POST("/responses", openaiResponsesHandlers.Responses)
-		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
+		v1.POST("/responses", s.requireAuthorizedModelFromBody(openaiResponsesHandlers.Responses))
+		v1.POST("/responses/compact", s.requireAuthorizedModelFromBody(openaiResponsesHandlers.Compact))
 	}
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))
+	v1beta.Use(s.clientAPIKeyAuthorizationMiddleware())
 	{
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
-		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
-		v1beta.GET("/models/*action", geminiHandlers.GeminiGetHandler)
+		v1beta.POST("/models/*action", s.requireAuthorizedGeminiAction(geminiHandlers.GeminiHandler))
+		v1beta.GET("/models/*action", s.requireAuthorizedGeminiAction(geminiHandlers.GeminiGetHandler))
 	}
 
 	// Root endpoint
@@ -476,6 +485,101 @@ func (s *Server) setupRoutes() {
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
 }
 
+func (s *Server) clientAPIKeyAuthorizationMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		entry, ok := s.authorizedClientAPIKey(c)
+		if !ok {
+			c.Next()
+			return
+		}
+		if entry.Enabled != nil && !*entry.Enabled {
+			abortClientAPIKeyRequest(c, http.StatusForbidden, "api key disabled")
+			return
+		}
+		if entry.CreditBalance <= 0 {
+			abortClientAPIKeyRequest(c, http.StatusForbidden, "insufficient credit balance")
+			return
+		}
+		c.Set("clientAPIKey", entry)
+		c.Next()
+	}
+}
+
+func (s *Server) requireAuthorizedModelFromBody(next gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		modelName, ok := readModelNameFromBody(c)
+		if !ok {
+			abortClientAPIKeyRequest(c, http.StatusBadRequest, "model is required")
+			return
+		}
+		if !s.isModelAllowedForRequest(c, modelName) {
+			abortClientAPIKeyRequest(c, http.StatusForbidden, "model not allowed for this api key")
+			return
+		}
+		next(c)
+	}
+}
+
+func (s *Server) requireAuthorizedGeminiAction(next gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		action := strings.TrimPrefix(c.Param("action"), "/")
+		modelName := action
+		if idx := strings.Index(modelName, ":"); idx >= 0 {
+			modelName = modelName[:idx]
+		}
+		modelName = strings.TrimPrefix(strings.TrimSpace(modelName), "models/")
+		if modelName != "" && !s.isModelAllowedForRequest(c, modelName) {
+			abortClientAPIKeyRequest(c, http.StatusForbidden, "model not allowed for this api key")
+			return
+		}
+		next(c)
+	}
+}
+
+func (s *Server) authorizedClientAPIKey(c *gin.Context) (*config.ClientAPIKey, bool) {
+	if s == nil || s.cfg == nil {
+		return nil, false
+	}
+	principal, _ := c.Get("apiKey")
+	apiKey, _ := principal.(string)
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return nil, false
+	}
+	for i := range s.cfg.APIKeys {
+		if s.cfg.APIKeys[i].Key == apiKey {
+			return &s.cfg.APIKeys[i], true
+		}
+	}
+	return nil, false
+}
+
+func (s *Server) isModelAllowedForRequest(c *gin.Context, modelName string) bool {
+	entry, ok := s.authorizedClientAPIKey(c)
+	if !ok {
+		return true
+	}
+	modelName = strings.TrimPrefix(strings.TrimSpace(modelName), "models/")
+	if modelName == "" {
+		return false
+	}
+	if len(entry.AllowedModels) == 0 {
+		return true
+	}
+	for _, allowed := range entry.AllowedModels {
+		if strings.EqualFold(strings.TrimSpace(allowed), modelName) {
+			return true
+		}
+	}
+	return false
+}
+
+func abortClientAPIKeyRequest(c *gin.Context, status int, message string) {
+	payload := handlers.BuildErrorResponseBody(status, message)
+	c.Data(status, "application/json", payload)
+	c.Abort()
+}
+
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
 // The handler is served as-is without additional middleware beyond the standard stack already configured.
 func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
@@ -573,6 +677,23 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
+
+		mgmt.GET("/client-api-keys", s.mgmt.GetClientAPIKeys)
+		mgmt.POST("/client-api-keys", s.mgmt.PutClientAPIKeys)
+		mgmt.PATCH("/client-api-keys", s.mgmt.PatchClientAPIKeys)
+		mgmt.DELETE("/client-api-keys", s.mgmt.DeleteClientAPIKeys)
+
+		mgmt.GET("/model-pricing", s.mgmt.GetModelPricing)
+		mgmt.POST("/model-pricing", s.mgmt.PutModelPricing)
+		mgmt.PATCH("/model-pricing", s.mgmt.PatchModelPricing)
+		mgmt.DELETE("/model-pricing", s.mgmt.DeleteModelPricing)
+		mgmt.GET("/models/catalog", s.mgmt.GetModelsCatalog)
+
+		mgmt.GET("/client-api-keys/:id/ledger", s.mgmt.GetClientAPIKeyLedger)
+		mgmt.POST("/client-api-keys/:id/topups", s.mgmt.PostClientAPIKeyTopup)
+		mgmt.POST("/client-api-keys/:id/adjustments", s.mgmt.PostClientAPIKeyAdjustment)
+		mgmt.GET("/client-api-keys/:id/usage", s.mgmt.GetClientAPIKeyUsage)
+		mgmt.GET("/billing/overview", s.mgmt.GetBillingOverview)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -815,15 +936,108 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 	return func(c *gin.Context) {
 		userAgent := c.GetHeader("User-Agent")
 
+		entry, restricted := s.authorizedClientAPIKey(c)
+		if restricted && entry.Enabled != nil && !*entry.Enabled {
+			abortClientAPIKeyRequest(c, http.StatusForbidden, "api key disabled")
+			return
+		}
+
 		// Route to Claude handler if User-Agent starts with "claude-cli"
 		if strings.HasPrefix(userAgent, "claude-cli") {
-			// log.Debugf("Routing /v1/models to Claude handler for User-Agent: %s", userAgent)
-			claudeHandler.ClaudeModels(c)
+			models := claudeHandler.Models()
+			if restricted {
+				models = filterAllowedModelMaps(models, entry.AllowedModels)
+			}
+			firstID := ""
+			lastID := ""
+			if len(models) > 0 {
+				if id, ok := models[0]["id"].(string); ok {
+					firstID = id
+				}
+				if id, ok := models[len(models)-1]["id"].(string); ok {
+					lastID = id
+				}
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"data":     models,
+				"has_more": false,
+				"first_id": firstID,
+				"last_id":  lastID,
+			})
 		} else {
-			// log.Debugf("Routing /v1/models to OpenAI handler for User-Agent: %s", userAgent)
-			openaiHandler.OpenAIModels(c)
+			allModels := openaiHandler.Models()
+			if restricted {
+				allModels = filterAllowedModelMaps(allModels, entry.AllowedModels)
+			}
+			filteredModels := make([]map[string]any, len(allModels))
+			for i, model := range allModels {
+				filteredModel := map[string]any{
+					"id":     model["id"],
+					"object": model["object"],
+				}
+				if created, exists := model["created"]; exists {
+					filteredModel["created"] = created
+				}
+				if ownedBy, exists := model["owned_by"]; exists {
+					filteredModel["owned_by"] = ownedBy
+				}
+				filteredModels[i] = filteredModel
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"object": "list",
+				"data":   filteredModels,
+			})
 		}
 	}
+}
+
+func readModelNameFromBody(c *gin.Context) (string, bool) {
+	if c == nil || c.Request == nil || c.Request.Body == nil {
+		return "", false
+	}
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		return "", false
+	}
+	c.Request.Body = io.NopCloser(bytes.NewReader(body))
+	modelName := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if modelName == "" {
+		return "", false
+	}
+	return modelName, true
+}
+
+func filterAllowedModelMaps(models []map[string]any, allowed []string) []map[string]any {
+	if len(allowed) == 0 {
+		return models
+	}
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, model := range allowed {
+		trimmed := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(model), "models/"))
+		if trimmed == "" {
+			continue
+		}
+		allowedSet[trimmed] = struct{}{}
+	}
+	if len(allowedSet) == 0 {
+		return models
+	}
+	filtered := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		id, _ := model["id"].(string)
+		name, _ := model["name"].(string)
+		for _, candidate := range []string{id, name} {
+			trimmed := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(candidate), "models/"))
+			if trimmed == "" {
+				continue
+			}
+			if _, ok := allowedSet[trimmed]; ok {
+				filtered = append(filtered, model)
+				break
+			}
+		}
+	}
+	return filtered
 }
 
 // Start begins listening for and serving HTTP or HTTPS requests.
@@ -1016,6 +1230,10 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	if s.mgmt != nil {
 		s.mgmt.SetConfig(cfg)
 		s.mgmt.SetAuthManager(s.handlers.AuthManager)
+		s.mgmt.SetBillingManager(s.billingManager)
+	}
+	if s.billingManager != nil {
+		s.billingManager.SetConfig(cfg, s.configFilePath)
 	}
 
 	// Notify Amp module only when Amp config has changed.

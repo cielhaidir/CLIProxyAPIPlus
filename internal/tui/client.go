@@ -255,8 +255,22 @@ func (c *Client) GetAPIKeys() ([]string, error) {
 		return nil, err
 	}
 	var result []string
-	if err := json.Unmarshal(raw, &result); err != nil {
+	if err := json.Unmarshal(raw, &result); err == nil {
+		return result, nil
+	}
+	var objects []struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(raw, &objects); err != nil {
 		return nil, err
+	}
+	result = make([]string, 0, len(objects))
+	for _, item := range objects {
+		key := strings.TrimSpace(item.Key)
+		if key == "" {
+			continue
+		}
+		result = append(result, key)
 	}
 	return result, nil
 }
@@ -271,7 +285,7 @@ func (c *Client) AddAPIKey(key string) error {
 
 // EditAPIKey replaces an API key at the given index.
 func (c *Client) EditAPIKey(index int, newValue string) error {
-	body := map[string]any{"index": index, "value": newValue}
+	body := map[string]any{"index": index, "value": map[string]any{"key": newValue}}
 	jsonBody, _ := json.Marshal(body)
 	_, err := c.patch("/v0/management/api-keys", strings.NewReader(string(jsonBody)))
 	return err

@@ -697,6 +697,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
+	cfg.SanitizeClientAPIKeys()
+
+	// Sanitize model pricing configuration.
+	cfg.SanitizeModelPricing()
+
+	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
 	// Sanitize Vertex-compatible API keys.
@@ -746,6 +752,127 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// SanitizeClientAPIKeys trims and deduplicates managed client API keys.
+func (cfg *Config) SanitizeClientAPIKeys() {
+	if cfg == nil {
+		return
+	}
+	seen := make(map[string]struct{}, len(cfg.APIKeys))
+	out := make([]ClientAPIKey, 0, len(cfg.APIKeys))
+	for i := range cfg.APIKeys {
+		entry := cfg.APIKeys[i]
+		entry.Key = strings.TrimSpace(entry.Key)
+		if entry.Key == "" {
+			continue
+		}
+		if _, exists := seen[entry.Key]; exists {
+			continue
+		}
+		seen[entry.Key] = struct{}{}
+		entry.Name = strings.TrimSpace(entry.Name)
+		entry.Notes = strings.TrimSpace(entry.Notes)
+		entry.Currency = strings.ToUpper(strings.TrimSpace(entry.Currency))
+		if entry.Currency == "" {
+			entry.Currency = "USD"
+		}
+		if entry.Currency != "USD" {
+			entry.Currency = "USD"
+		}
+		if entry.CreditBalance < 0 {
+			entry.CreditBalance = 0
+		}
+		if entry.TotalTopup < 0 {
+			entry.TotalTopup = 0
+		}
+		if entry.TotalSpent < 0 {
+			entry.TotalSpent = 0
+		}
+		entry.AllowedModels = normalizeUniqueStrings(entry.AllowedModels, false)
+		if entry.Enabled == nil {
+			enabled := true
+			entry.Enabled = &enabled
+		}
+		out = append(out, entry)
+	}
+	cfg.APIKeys = out
+}
+
+// SanitizeModelPricing trims and deduplicates model pricing entries.
+func (cfg *Config) SanitizeModelPricing() {
+	if cfg == nil {
+		return
+	}
+	seen := make(map[string]struct{}, len(cfg.ModelPricing))
+	out := make([]ModelPricing, 0, len(cfg.ModelPricing))
+	for i := range cfg.ModelPricing {
+		entry := cfg.ModelPricing[i]
+		entry.Model = strings.TrimSpace(entry.Model)
+		if entry.Model == "" {
+			continue
+		}
+		key := strings.ToLower(entry.Model)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		entry.Currency = strings.ToUpper(strings.TrimSpace(entry.Currency))
+		if entry.Currency == "" {
+			entry.Currency = "USD"
+		}
+		if entry.Currency != "USD" {
+			entry.Currency = "USD"
+		}
+		entry.PricingType = strings.TrimSpace(entry.PricingType)
+		if entry.InputPrice < 0 {
+			entry.InputPrice = 0
+		}
+		if entry.OutputPrice < 0 {
+			entry.OutputPrice = 0
+		}
+		if entry.ReasoningPrice < 0 {
+			entry.ReasoningPrice = 0
+		}
+		if entry.CachedInputPrice < 0 {
+			entry.CachedInputPrice = 0
+		}
+		if entry.RequestPrice < 0 {
+			entry.RequestPrice = 0
+		}
+		if entry.Enabled == nil {
+			enabled := true
+			entry.Enabled = &enabled
+		}
+		out = append(out, entry)
+	}
+	cfg.ModelPricing = out
+}
+
+func normalizeUniqueStrings(values []string, lowercase bool) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		trimmed := strings.TrimSpace(raw)
+		if lowercase {
+			trimmed = strings.ToLower(trimmed)
+		}
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.

@@ -35,11 +35,46 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: '~/.cli-proxy-api'
 
-# API keys for authentication
+# Client API keys for authentication, model allow-listing, and balance tracking.
+# Legacy string entries still load, but new configs should use object entries.
 api-keys:
-  - 'your-api-key-1'
-  - 'your-api-key-2'
-  - 'your-api-key-3'
+  - key: 'your-api-key-1'
+    name: 'Team A'
+    enabled: true
+    currency: 'USD'
+    credit-balance: 2500
+    total-topup: 3000
+    total-spent: 500
+    allowed-models:
+      - 'gpt-4.1'
+      - 'claude-sonnet-4-5'
+    notes: 'Example managed client key'
+  - key: 'your-api-key-2'
+    name: 'Team B'
+    enabled: true
+    currency: 'USD'
+    credit-balance: 1000
+    allowed-models:
+      - 'gpt-4.1-mini'
+
+# Per-model pricing for billing. Integer values are stored in internal billing units
+# and interpreted as per-1M-token rates for token-based fields.
+model-pricing:
+  - model: 'gpt-4.1'
+    currency: 'USD'
+    pricing-type: 'per_1m_tokens'
+    input-price: 200
+    output-price: 800
+    reasoning-price: 0
+    cached-input-price: 50
+    request-price: 0
+    enabled: true
+  - model: 'claude-sonnet-4-5'
+    currency: 'USD'
+    pricing-type: 'per_1m_tokens'
+    input-price: 300
+    output-price: 1500
+    enabled: true
 
 # Enable debug logging
 debug: false

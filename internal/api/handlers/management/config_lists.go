@@ -105,17 +105,386 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 }
 
 // api-keys
-func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
+func (h *Handler) GetAPIKeys(c *gin.Context) {
+	keys := make([]string, 0, len(h.cfg.APIKeys))
+	for _, entry := range h.cfg.APIKeys {
+		if trimmed := strings.TrimSpace(entry.Key); trimmed != "" {
+			keys = append(keys, trimmed)
+		}
+	}
+	c.JSON(200, gin.H{"api-keys": keys})
+}
 func (h *Handler) PutAPIKeys(c *gin.Context) {
-	h.putStringList(c, func(v []string) {
-		h.cfg.APIKeys = append([]string(nil), v...)
-	}, nil)
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.ClientAPIKey
+	if err = json.Unmarshal(data, &arr); err == nil {
+		h.cfg.APIKeys = append([]config.ClientAPIKey(nil), arr...)
+		h.cfg.SanitizeClientAPIKeys()
+		h.persist(c)
+		return
+	}
+	var keyItems []string
+	if err = json.Unmarshal(data, &keyItems); err == nil {
+		h.cfg.APIKeys = legacyStringsToClientAPIKeys(keyItems)
+		h.cfg.SanitizeClientAPIKeys()
+		h.persist(c)
+		return
+	}
+	var obj struct {
+		Items []config.ClientAPIKey `json:"items"`
+	}
+	if err = json.Unmarshal(data, &obj); err == nil {
+		h.cfg.APIKeys = append([]config.ClientAPIKey(nil), obj.Items...)
+		h.cfg.SanitizeClientAPIKeys()
+		h.persist(c)
+		return
+	}
+	var legacyObj struct {
+		Items []string `json:"items"`
+	}
+	if err = json.Unmarshal(data, &legacyObj); err == nil {
+		h.cfg.APIKeys = legacyStringsToClientAPIKeys(legacyObj.Items)
+		h.cfg.SanitizeClientAPIKeys()
+		h.persist(c)
+		return
+	}
+	c.JSON(400, gin.H{"error": "invalid body"})
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {})
+	type clientAPIKeyPatch struct {
+		Key           *string  `json:"key"`
+		Name          *string  `json:"name"`
+		Enabled       *bool    `json:"enabled"`
+		AllowedModels *[]string `json:"allowed-models"`
+		CreditBalance *int64   `json:"credit-balance"`
+		Currency      *string  `json:"currency"`
+		TotalTopup    *int64   `json:"total-topup"`
+		TotalSpent    *int64   `json:"total-spent"`
+		Notes         *string  `json:"notes"`
+		CreatedAt     *string  `json:"created-at"`
+		UpdatedAt     *string  `json:"updated-at"`
+	}
+	var body struct {
+		Index *int               `json:"index"`
+		Match *string            `json:"match"`
+		Old   *string            `json:"old"`
+		New   *string            `json:"new"`
+		Value *clientAPIKeyPatch `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	if body.Old != nil && body.New != nil && body.Value == nil {
+		oldKey := strings.TrimSpace(*body.Old)
+		newKey := strings.TrimSpace(*body.New)
+		for i := range h.cfg.APIKeys {
+			if h.cfg.APIKeys[i].Key == oldKey {
+				if newKey == "" {
+					h.cfg.APIKeys = append(h.cfg.APIKeys[:i], h.cfg.APIKeys[i+1:]...)
+				} else {
+					h.cfg.APIKeys[i].Key = newKey
+				}
+				h.cfg.SanitizeClientAPIKeys()
+				h.persist(c)
+				return
+			}
+		}
+		if newKey != "" {
+			h.cfg.APIKeys = append(h.cfg.APIKeys, legacyStringsToClientAPIKeys([]string{newKey})...)
+			h.cfg.SanitizeClientAPIKeys()
+			h.persist(c)
+			return
+		}
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.APIKeys) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 {
+		for _, matchPtr := range []*string{body.Match, body.Old} {
+			if matchPtr == nil {
+				continue
+			}
+			match := strings.TrimSpace(*matchPtr)
+			if match == "" {
+				continue
+			}
+			for i := range h.cfg.APIKeys {
+				if h.cfg.APIKeys[i].Key == match {
+					targetIndex = i
+					break
+				}
+			}
+			if targetIndex != -1 {
+				break
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+	if body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	entry := h.cfg.APIKeys[targetIndex]
+	if body.Value.Key != nil {
+		trimmed := strings.TrimSpace(*body.Value.Key)
+		if trimmed == "" {
+			h.cfg.APIKeys = append(h.cfg.APIKeys[:targetIndex], h.cfg.APIKeys[targetIndex+1:]...)
+			h.cfg.SanitizeClientAPIKeys()
+			h.persist(c)
+			return
+		}
+		entry.Key = trimmed
+	}
+	if body.Value.Name != nil {
+		entry.Name = strings.TrimSpace(*body.Value.Name)
+	}
+	if body.Value.Enabled != nil {
+		enabled := *body.Value.Enabled
+		entry.Enabled = &enabled
+	}
+	if body.Value.AllowedModels != nil {
+		entry.AllowedModels = append([]string(nil), (*body.Value.AllowedModels)...)
+	}
+	if body.Value.CreditBalance != nil {
+		entry.CreditBalance = *body.Value.CreditBalance
+	}
+	if body.Value.Currency != nil {
+		entry.Currency = strings.TrimSpace(*body.Value.Currency)
+	}
+	if body.Value.TotalTopup != nil {
+		entry.TotalTopup = *body.Value.TotalTopup
+	}
+	if body.Value.TotalSpent != nil {
+		entry.TotalSpent = *body.Value.TotalSpent
+	}
+	if body.Value.Notes != nil {
+		entry.Notes = strings.TrimSpace(*body.Value.Notes)
+	}
+	if body.Value.CreatedAt != nil {
+		entry.CreatedAt = strings.TrimSpace(*body.Value.CreatedAt)
+	}
+	if body.Value.UpdatedAt != nil {
+		entry.UpdatedAt = strings.TrimSpace(*body.Value.UpdatedAt)
+	}
+	h.cfg.APIKeys[targetIndex] = entry
+	h.cfg.SanitizeClientAPIKeys()
+	h.persist(c)
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(h.cfg.APIKeys) {
+			h.cfg.APIKeys = append(h.cfg.APIKeys[:idx], h.cfg.APIKeys[idx+1:]...)
+			h.cfg.SanitizeClientAPIKeys()
+			h.persist(c)
+			return
+		}
+	}
+	if val := strings.TrimSpace(c.Query("value")); val != "" {
+		out := make([]config.ClientAPIKey, 0, len(h.cfg.APIKeys))
+		for _, v := range h.cfg.APIKeys {
+			if strings.TrimSpace(v.Key) != val {
+				out = append(out, v)
+			}
+		}
+		h.cfg.APIKeys = out
+		h.cfg.SanitizeClientAPIKeys()
+		h.persist(c)
+		return
+	}
+	c.JSON(400, gin.H{"error": "missing index or value"})
+}
+
+func legacyStringsToClientAPIKeys(keys []string) []config.ClientAPIKey {
+	if len(keys) == 0 {
+		return nil
+	}
+	out := make([]config.ClientAPIKey, 0, len(keys))
+	for _, raw := range keys {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		enabled := true
+		out = append(out, config.ClientAPIKey{Key: trimmed, Enabled: &enabled, Currency: "USD"})
+	}
+	return out
+}
+
+func (h *Handler) GetClientAPIKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"client-api-keys": h.cfg.APIKeys})
+}
+
+func (h *Handler) PutClientAPIKeys(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.ClientAPIKey
+	if err = json.Unmarshal(data, &arr); err != nil {
+		var obj struct {
+			Items []config.ClientAPIKey `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	h.cfg.APIKeys = append([]config.ClientAPIKey(nil), arr...)
+	h.cfg.SanitizeClientAPIKeys()
+	h.persist(c)
+}
+
+func (h *Handler) PatchClientAPIKeys(c *gin.Context) { h.PatchAPIKeys(c) }
+
+func (h *Handler) DeleteClientAPIKeys(c *gin.Context) { h.DeleteAPIKeys(c) }
+
+func (h *Handler) GetModelPricing(c *gin.Context) {
+	c.JSON(200, gin.H{"model-pricing": h.cfg.ModelPricing})
+}
+
+func (h *Handler) PutModelPricing(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.ModelPricing
+	if err = json.Unmarshal(data, &arr); err != nil {
+		var obj struct {
+			Items []config.ModelPricing `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	h.cfg.ModelPricing = append([]config.ModelPricing(nil), arr...)
+	h.cfg.SanitizeModelPricing()
+	h.persist(c)
+}
+
+func (h *Handler) PatchModelPricing(c *gin.Context) {
+	type modelPricingPatch struct {
+		Model            *string `json:"model"`
+		Currency         *string `json:"currency"`
+		PricingType      *string `json:"pricing-type"`
+		InputPrice       *int64  `json:"input-price"`
+		OutputPrice      *int64  `json:"output-price"`
+		ReasoningPrice   *int64  `json:"reasoning-price"`
+		CachedInputPrice *int64  `json:"cached-input-price"`
+		RequestPrice     *int64  `json:"request-price"`
+		Enabled          *bool   `json:"enabled"`
+	}
+	var body struct {
+		Index *int               `json:"index"`
+		Match *string            `json:"match"`
+		Value *modelPricingPatch `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.ModelPricing) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Match != nil {
+		match := strings.TrimSpace(*body.Match)
+		for i := range h.cfg.ModelPricing {
+			if strings.EqualFold(h.cfg.ModelPricing[i].Model, match) {
+				targetIndex = i
+				break
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+	entry := h.cfg.ModelPricing[targetIndex]
+	if body.Value.Model != nil {
+		trimmed := strings.TrimSpace(*body.Value.Model)
+		if trimmed == "" {
+			h.cfg.ModelPricing = append(h.cfg.ModelPricing[:targetIndex], h.cfg.ModelPricing[targetIndex+1:]...)
+				h.cfg.SanitizeModelPricing()
+				h.persist(c)
+				return
+		}
+		entry.Model = trimmed
+	}
+	if body.Value.Currency != nil {
+		entry.Currency = strings.TrimSpace(*body.Value.Currency)
+	}
+	if body.Value.PricingType != nil {
+		entry.PricingType = strings.TrimSpace(*body.Value.PricingType)
+	}
+	if body.Value.InputPrice != nil {
+		entry.InputPrice = *body.Value.InputPrice
+	}
+	if body.Value.OutputPrice != nil {
+		entry.OutputPrice = *body.Value.OutputPrice
+	}
+	if body.Value.ReasoningPrice != nil {
+		entry.ReasoningPrice = *body.Value.ReasoningPrice
+	}
+	if body.Value.CachedInputPrice != nil {
+		entry.CachedInputPrice = *body.Value.CachedInputPrice
+	}
+	if body.Value.RequestPrice != nil {
+		entry.RequestPrice = *body.Value.RequestPrice
+	}
+	if body.Value.Enabled != nil {
+		enabled := *body.Value.Enabled
+		entry.Enabled = &enabled
+	}
+	h.cfg.ModelPricing[targetIndex] = entry
+	h.cfg.SanitizeModelPricing()
+	h.persist(c)
+}
+
+func (h *Handler) DeleteModelPricing(c *gin.Context) {
+	if val := strings.TrimSpace(c.Query("model")); val != "" {
+		out := make([]config.ModelPricing, 0, len(h.cfg.ModelPricing))
+		for _, v := range h.cfg.ModelPricing {
+			if !strings.EqualFold(strings.TrimSpace(v.Model), val) {
+				out = append(out, v)
+			}
+		}
+		if len(out) == len(h.cfg.ModelPricing) {
+			c.JSON(404, gin.H{"error": "item not found"})
+			return
+		}
+		h.cfg.ModelPricing = out
+		h.cfg.SanitizeModelPricing()
+		h.persist(c)
+		return
+	}
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil && idx >= 0 && idx < len(h.cfg.ModelPricing) {
+			h.cfg.ModelPricing = append(h.cfg.ModelPricing[:idx], h.cfg.ModelPricing[idx+1:]...)
+			h.cfg.SanitizeModelPricing()
+			h.persist(c)
+			return
+		}
+	}
+	c.JSON(400, gin.H{"error": "missing model or index"})
 }
 
 // gemini-api-key: []GeminiKey
