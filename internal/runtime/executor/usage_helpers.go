@@ -16,24 +16,30 @@ import (
 )
 
 type usageReporter struct {
-	provider    string
-	model       string
-	authID      string
-	authIndex   string
-	apiKey      string
-	source      string
-	requestedAt time.Time
-	once        sync.Once
+	provider     string
+	model        string
+	billingModel string
+	authID       string
+	authIndex    string
+	apiKey       string
+	source       string
+	requestedAt  time.Time
+	once         sync.Once
 }
 
 func newUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *usageReporter {
 	apiKey := apiKeyFromContext(ctx)
+	billingModel := billingModelFromContext(ctx)
+	if strings.TrimSpace(billingModel) == "" {
+		billingModel = model
+	}
 	reporter := &usageReporter{
-		provider:    provider,
-		model:       model,
-		requestedAt: time.Now(),
-		apiKey:      apiKey,
-		source:      resolveUsageSource(auth, apiKey),
+		provider:     provider,
+		model:        model,
+		billingModel: billingModel,
+		requestedAt:  time.Now(),
+		apiKey:       apiKey,
+		source:       resolveUsageSource(auth, apiKey),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -96,7 +102,7 @@ func (r *usageReporter) buildRecord(detail usage.Detail, failed bool) usage.Reco
 	}
 	return usage.Record{
 		Provider:    r.provider,
-		Model:       r.model,
+		Model:       r.billingModel,
 		Source:      r.source,
 		APIKey:      r.apiKey,
 		AuthID:      r.authID,
@@ -106,6 +112,37 @@ func (r *usageReporter) buildRecord(detail usage.Detail, failed bool) usage.Reco
 		Failed:      failed,
 		Detail:      detail,
 	}
+}
+
+func billingModelFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return ""
+	}
+	if v, exists := ginCtx.Get("billingModel"); exists {
+		switch value := v.(type) {
+		case string:
+			return strings.TrimSpace(value)
+		case fmt.Stringer:
+			return strings.TrimSpace(value.String())
+		}
+	}
+	if v, exists := ginCtx.Get("mapped_model"); exists {
+		switch value := v.(type) {
+		case string:
+			return strings.TrimSpace(value)
+		case fmt.Stringer:
+			return strings.TrimSpace(value.String())
+		}
+	}
+	return ""
+}
+
+func buildUsageReporterForTest(ctx context.Context, provider, model string) *usageReporter {
+	return newUsageReporter(ctx, provider, model, nil)
 }
 
 func (r *usageReporter) latency() time.Duration {

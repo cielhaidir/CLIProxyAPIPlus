@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
@@ -71,5 +73,44 @@ func TestManagerUsageDebit(t *testing.T) {
 	}
 	if entries[0].Type != "debit" || entries[0].Amount != -1000 {
 		t.Fatalf("unexpected debit entry: %#v", entries[0])
+	}
+}
+
+func TestManagerUsageDebitUsesResolvedBillingModel(t *testing.T) {
+	enabled := true
+	pricingEnabled := true
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys: []config.ClientAPIKey{{Key: "k1", Enabled: &enabled, Currency: "USD", CreditBalance: 5000}},
+			ModelPricing: []config.ModelPricing{{
+				Model:       "gpt-5-4",
+				Currency:    "USD",
+				InputPrice:  250,
+				OutputPrice: 1500,
+				Enabled:     &pricingEnabled,
+			}},
+		},
+	}
+	mgr := NewManager(cfg, filepath.Join(t.TempDir(), "config.yaml"))
+	ginCtx := &gin.Context{}
+	ginCtx.Set("billingModel", "gpt-5-4")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	mgr.HandleUsageRecord(ctx, coreusage.Record{
+		APIKey: "k1",
+		Model:  "gpt-5.4",
+		Detail: coreusage.Detail{InputTokens: 1000000, OutputTokens: 1000000, TotalTokens: 2000000},
+	})
+	if cfg.APIKeys[0].CreditBalance != 3250 {
+		t.Fatalf("credit balance = %d, want 3250", cfg.APIKeys[0].CreditBalance)
+	}
+	if cfg.APIKeys[0].TotalSpent != 1750 {
+		t.Fatalf("total spent = %d, want 1750", cfg.APIKeys[0].TotalSpent)
+	}
+	entries := mgr.Ledger("k1")
+	if len(entries) != 1 {
+		t.Fatalf("ledger entries = %d, want 1", len(entries))
+	}
+	if entries[0].Model != "gpt-5-4" {
+		t.Fatalf("ledger model = %q, want billed model", entries[0].Model)
 	}
 }

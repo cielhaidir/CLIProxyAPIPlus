@@ -191,6 +191,7 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				// Store mapped model in context for handlers that check it (like gemini bridge)
 				c.Set(MappedModelContextKey, mappedModel)
+				c.Set("billingModel", mappedModel)
 				resolvedModel = mappedModel
 				usedMapping = true
 				providers = mappedProviders
@@ -212,11 +213,15 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 					c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 					// Store mapped model in context for handlers that check it (like gemini bridge)
 					c.Set(MappedModelContextKey, mappedModel)
+					c.Set("billingModel", mappedModel)
 					resolvedModel = mappedModel
 					usedMapping = true
 					providers = mappedProviders
 				}
 			}
+		}
+		if strings.TrimSpace(resolvedModel) != "" {
+			c.Set("billingModel", resolvedModel)
 		}
 
 		// If no providers available, fallback to ampcode.com

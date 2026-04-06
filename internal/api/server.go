@@ -512,6 +512,7 @@ func (s *Server) requireAuthorizedModelFromBody(next gin.HandlerFunc) gin.Handle
 			abortClientAPIKeyRequest(c, http.StatusBadRequest, "model is required")
 			return
 		}
+		c.Set("billingModel", strings.TrimPrefix(strings.TrimSpace(modelName), "models/"))
 		if !s.isModelAllowedForRequest(c, modelName) {
 			abortClientAPIKeyRequest(c, http.StatusForbidden, "model not allowed for this api key")
 			return
@@ -528,6 +529,9 @@ func (s *Server) requireAuthorizedGeminiAction(next gin.HandlerFunc) gin.Handler
 			modelName = modelName[:idx]
 		}
 		modelName = strings.TrimPrefix(strings.TrimSpace(modelName), "models/")
+		if modelName != "" {
+			c.Set("billingModel", modelName)
+		}
 		if modelName != "" && !s.isModelAllowedForRequest(c, modelName) {
 			abortClientAPIKeyRequest(c, http.StatusForbidden, "model not allowed for this api key")
 			return

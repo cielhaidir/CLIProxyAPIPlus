@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
@@ -154,7 +155,7 @@ func (m *Manager) HandleUsageRecord(ctx context.Context, record coreusage.Record
 	if m == nil || record.APIKey == "" || record.Failed {
 		return
 	}
-	amount, pricing, ok := m.calculateDebit(record)
+	amount, pricing, billingModel, ok := m.calculateDebit(ctx, record)
 	if !ok {
 		return
 	}
@@ -164,7 +165,7 @@ func (m *Manager) HandleUsageRecord(ctx context.Context, record coreusage.Record
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	entry, clientKey, err := m.prepareUsageDebitLocked(ctx, record, amount, pricing)
+	entry, clientKey, err := m.prepareUsageDebitLocked(ctx, record, billingModel, amount, pricing)
 	if err != nil {
 		log.WithError(err).WithField("api_key", record.APIKey).Warn("billing: failed to apply usage debit")
 		return
@@ -221,7 +222,7 @@ func (m *Manager) applyManualEntry(apiKey string, entry LedgerEntry) (*config.Cl
 	return &clone, nil
 }
 
-func (m *Manager) prepareUsageDebitLocked(ctx context.Context, record coreusage.Record, amount int64, pricing *config.ModelPricing) (LedgerEntry, *config.ClientAPIKey, error) {
+func (m *Manager) prepareUsageDebitLocked(ctx context.Context, record coreusage.Record, billingModel string, amount int64, pricing *config.ModelPricing) (LedgerEntry, *config.ClientAPIKey, error) {
 	clientKey, err := m.findClientKeyLocked(record.APIKey)
 	if err != nil {
 		return LedgerEntry{}, nil, err
@@ -232,38 +233,56 @@ func (m *Manager) prepareUsageDebitLocked(ctx context.Context, record coreusage.
 		Type:            "debit",
 		Amount:          -amount,
 		Currency:        pricing.Currency,
-		Model:           strings.TrimSpace(record.Model),
+		Model:           strings.TrimSpace(billingModel),
 		RequestID:       logging.GetRequestID(ctx),
 		InputTokens:     record.Detail.InputTokens,
 		OutputTokens:    record.Detail.OutputTokens,
 		ReasoningTokens: record.Detail.ReasoningTokens,
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 		CreatedBy:       "usage-billing",
-		Description:     fmt.Sprintf("usage debit for model %s", strings.TrimSpace(record.Model)),
+		Description:     fmt.Sprintf("usage debit for model %s", strings.TrimSpace(billingModel)),
 	}
 	return entry, clientKey, nil
 }
 
-func (m *Manager) calculateDebit(record coreusage.Record) (int64, *config.ModelPricing, bool) {
+func (m *Manager) calculateDebit(ctx context.Context, record coreusage.Record) (int64, *config.ModelPricing, string, bool) {
 	if m == nil || m.cfg == nil {
-		return 0, nil, false
+		return 0, nil, "", false
 	}
-	modelName := strings.TrimPrefix(strings.TrimSpace(record.Model), "models/")
-	if modelName == "" {
-		return 0, nil, false
+	billingModel := resolveBillingModel(ctx, record.Model)
+	if billingModel == "" {
+		return 0, nil, "", false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	pricing := m.findPricingLocked(modelName)
+	pricing := m.findPricingLocked(billingModel)
 	if pricing == nil {
-		log.WithField("model", modelName).Warn("billing: missing model pricing, skipping debit")
-		return 0, nil, false
+		log.WithField("model", billingModel).Warn("billing: missing model pricing, skipping debit")
+		return 0, nil, billingModel, false
 	}
 	if pricing.Enabled != nil && !*pricing.Enabled {
-		return 0, nil, false
+		return 0, nil, billingModel, false
 	}
 	amount := calculateUsageCost(record.Detail, pricing)
-	return amount, pricing, true
+	return amount, pricing, billingModel, true
+}
+
+func resolveBillingModel(ctx context.Context, usageModel string) string {
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+		if v, exists := ginCtx.Get("billingModel"); exists {
+			switch value := v.(type) {
+			case string:
+				if trimmed := strings.TrimPrefix(strings.TrimSpace(value), "models/"); trimmed != "" {
+					return trimmed
+				}
+			case fmt.Stringer:
+				if trimmed := strings.TrimPrefix(strings.TrimSpace(value.String()), "models/"); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	}
+	return strings.TrimPrefix(strings.TrimSpace(usageModel), "models/")
 }
 
 func calculateUsageCost(detail coreusage.Detail, pricing *config.ModelPricing) int64 {
