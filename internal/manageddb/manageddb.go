@@ -3,6 +3,7 @@ package manageddb
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,6 +131,11 @@ func (s *Store) ensureSchema() error {
 			description TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
 			created_by TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE TABLE IF NOT EXISTS usage_statistics (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			snapshot_json TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL DEFAULT ''
 		)`,
 	}
 	for _, q := range queries {
@@ -336,6 +342,37 @@ func (s *Store) Ledger(ctx context.Context, apiKey string) ([]managedtypes.Ledge
 		out = append(out, entry)
 	}
 	return out, nil
+}
+
+func (s *Store) SaveUsageStatisticsJSON(ctx context.Context, payload []byte) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO usage_statistics (id, snapshot_json, updated_at)
+		VALUES (1, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET snapshot_json=excluded.snapshot_json, updated_at=excluded.updated_at
+	`, string(payload), time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+func (s *Store) LoadUsageStatisticsJSON(ctx context.Context) ([]byte, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	var payload string
+	err := s.db.QueryRowContext(ctx, `SELECT snapshot_json FROM usage_statistics WHERE id = 1`).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	trimmed := strings.TrimSpace(payload)
+	if trimmed == "" {
+		return nil, nil
+	}
+	return []byte(trimmed), nil
 }
 
 func defaultCurrency(value string) string {

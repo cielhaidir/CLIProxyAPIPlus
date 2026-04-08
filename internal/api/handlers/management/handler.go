@@ -70,6 +70,11 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		envSecret:           envSecret,
 		billingManager:      billing.NewManager(cfg, configFilePath),
 	}
+	if store := manageddb.Default(); store != nil && h.usageStats != nil {
+		if _, err := h.usageStats.LoadSnapshotJSON(callerContext(), store); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to load persisted usage statistics: %v\n", err)
+		}
+	}
 	h.startAttemptCleanup()
 	return h
 }

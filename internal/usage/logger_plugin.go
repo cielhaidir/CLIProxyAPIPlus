@@ -5,6 +5,7 @@ package usage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/manageddb"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -59,6 +61,9 @@ func StatisticsEnabled() bool { return statisticsEnabled.Load() }
 // RequestStatistics maintains aggregated request metrics in memory.
 type RequestStatistics struct {
 	mu sync.RWMutex
+
+	persistMu        sync.Mutex
+	persistScheduled bool
 
 	totalRequests int64
 	successCount  int64
@@ -140,6 +145,11 @@ var defaultRequestStatistics = NewRequestStatistics()
 // GetRequestStatistics returns the shared statistics store.
 func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics }
 
+type SnapshotStore interface {
+	SaveUsageStatisticsJSON(ctx context.Context, payload []byte) error
+	LoadUsageStatisticsJSON(ctx context.Context) ([]byte, error)
+}
+
 // NewRequestStatistics constructs an empty statistics store.
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
@@ -149,6 +159,33 @@ func NewRequestStatistics() *RequestStatistics {
 		tokensByDay:    make(map[string]int64),
 		tokensByHour:   make(map[int]int64),
 	}
+}
+
+func (s *RequestStatistics) LoadSnapshotJSON(ctx context.Context, store SnapshotStore) (MergeResult, error) {
+	result := MergeResult{}
+	if s == nil || store == nil {
+		return result, nil
+	}
+	payload, err := store.LoadUsageStatisticsJSON(ctx)
+	if err != nil || len(payload) == 0 {
+		return result, err
+	}
+	var snapshot StatisticsSnapshot
+	if err := json.Unmarshal(payload, &snapshot); err != nil {
+		return result, err
+	}
+	return s.MergeSnapshot(snapshot), nil
+}
+
+func (s *RequestStatistics) SaveSnapshotJSON(ctx context.Context, store SnapshotStore) error {
+	if s == nil || store == nil {
+		return nil
+	}
+	payload, err := json.Marshal(s.Snapshot())
+	if err != nil {
+		return err
+	}
+	return store.SaveUsageStatisticsJSON(ctx, payload)
 }
 
 // Record ingests a new usage record and updates the aggregates.
@@ -210,6 +247,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+	s.schedulePersist()
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
@@ -351,8 +389,31 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 			}
 		}
 	}
+	s.schedulePersist()
 
 	return result
+}
+
+func (s *RequestStatistics) schedulePersist() {
+	store := manageddb.Default()
+	if s == nil || store == nil {
+		return
+	}
+	s.persistMu.Lock()
+	if s.persistScheduled {
+		s.persistMu.Unlock()
+		return
+	}
+	s.persistScheduled = true
+	s.persistMu.Unlock()
+
+	go func() {
+		time.Sleep(2 * time.Second)
+		_ = s.SaveSnapshotJSON(context.Background(), store)
+		s.persistMu.Lock()
+		s.persistScheduled = false
+		s.persistMu.Unlock()
+	}()
 }
 
 func (s *RequestStatistics) recordImported(apiName, modelName string, stats *apiStats, detail RequestDetail) {
