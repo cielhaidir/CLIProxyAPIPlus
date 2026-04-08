@@ -2,12 +2,14 @@ package billing
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/manageddb"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -112,5 +114,47 @@ func TestManagerUsageDebitUsesResolvedBillingModel(t *testing.T) {
 	}
 	if entries[0].Model != "gpt-5-4" {
 		t.Fatalf("ledger model = %q, want billed model", entries[0].Model)
+	}
+}
+
+func TestManagerTopUpAndDebitWithSQLiteStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "runtime.db")
+	if err := os.Setenv("SQLITESTORE_PATH", dbPath); err != nil {
+		t.Fatalf("Setenv() error = %v", err)
+	}
+	defer func() {
+		os.Unsetenv("SQLITESTORE_PATH")
+		manageddb.ResetDefault()
+	}()
+	enabled := true
+	pricingEnabled := true
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			APIKeys:      []config.ClientAPIKey{{Key: "k1", Enabled: &enabled, Currency: "USD"}},
+			ModelPricing: []config.ModelPricing{{Model: "gpt-4.1", Currency: "USD", InputPrice: 200, OutputPrice: 800, Enabled: &pricingEnabled}},
+		},
+	}
+	if err := manageddb.Configure(cfg); err != nil {
+		t.Fatalf("manageddb.Configure() error = %v", err)
+	}
+	mgr := NewManager(cfg, filepath.Join(tmpDir, "config.yaml"))
+	if _, err := mgr.TopUp("k1", 1500, "admin", "seed"); err != nil {
+		t.Fatalf("TopUp() error = %v", err)
+	}
+	mgr.HandleUsageRecord(context.Background(), coreusage.Record{
+		APIKey: "k1",
+		Model:  "gpt-4.1",
+		Detail: coreusage.Detail{InputTokens: 1000000, OutputTokens: 1000000, TotalTokens: 2000000},
+	})
+	if cfg.APIKeys[0].CreditBalance != 500 {
+		t.Fatalf("credit balance = %d, want 500", cfg.APIKeys[0].CreditBalance)
+	}
+	entries := mgr.Ledger("k1")
+	if len(entries) != 2 {
+		t.Fatalf("ledger entries = %d, want 2", len(entries))
+	}
+	if entries[0].Type != "topup" || entries[1].Type != "debit" {
+		t.Fatalf("unexpected sqlite ledger order/types: %#v", entries)
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/manageddb"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -198,6 +199,10 @@ func main() {
 		objectStoreBucket    string
 		objectStoreLocalPath string
 		objectStoreInst      *store.ObjectTokenStore
+		useSQLiteStore       bool
+		sqliteStorePath      string
+		sqliteStoreLocalPath string
+		sqliteStoreInst      *store.SQLiteStore
 	)
 
 	wd, err := os.Getwd()
@@ -243,6 +248,13 @@ func main() {
 			}
 		}
 		useGitStore = false
+	}
+	if value, ok := lookupEnv("SQLITESTORE_PATH", "sqlitestore_path"); ok {
+		useSQLiteStore = true
+		sqliteStorePath = value
+	}
+	if value, ok := lookupEnv("SQLITESTORE_LOCAL_PATH", "sqlitestore_local_path"); ok {
+		sqliteStoreLocalPath = value
 	}
 	if value, ok := lookupEnv("GITSTORE_GIT_URL", "gitstore_git_url"); ok {
 		useGitStore = true
@@ -313,6 +325,45 @@ func main() {
 		if err == nil {
 			cfg.AuthDir = pgStoreInst.AuthDir()
 			log.Infof("postgres-backed token store enabled, workspace path: %s", pgStoreInst.WorkDir())
+		}
+	} else if useSQLiteStore {
+		if sqliteStoreLocalPath == "" {
+			if writableBase != "" {
+				sqliteStoreLocalPath = writableBase
+			} else {
+				sqliteStoreLocalPath = wd
+			}
+		}
+		sqliteRoot := filepath.Join(sqliteStoreLocalPath, "sqlitestore")
+		if sqliteStorePath == "" {
+			sqliteStorePath = filepath.Join(sqliteRoot, "runtime-config.db")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		sqliteStoreInst, err = store.NewSQLiteStore(ctx, store.SQLiteStoreConfig{
+			DBPath:   sqliteStorePath,
+			SpoolDir: sqliteRoot,
+		})
+		cancel()
+		if err != nil {
+			log.Errorf("failed to initialize sqlite config store: %v", err)
+			return
+		}
+		bootstrapPath := configPath
+		if strings.TrimSpace(bootstrapPath) == "" {
+			bootstrapPath = filepath.Join(wd, "config.yaml")
+		}
+		examplePath := filepath.Join(wd, "config.example.yaml")
+		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		if errBootstrap := sqliteStoreInst.Bootstrap(ctx, bootstrapPath, examplePath); errBootstrap != nil {
+			cancel()
+			log.Errorf("failed to bootstrap sqlite-backed config: %v", errBootstrap)
+			return
+		}
+		cancel()
+		configFilePath = sqliteStoreInst.ConfigPath()
+		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
+		if err == nil {
+			log.Infof("sqlite-backed config store enabled, workspace path: %s", sqliteStoreInst.WorkDir())
 		}
 	} else if useObjectStore {
 		if objectStoreLocalPath == "" {
@@ -444,6 +495,18 @@ func main() {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
+	if manageddb.Enabled() {
+		if err := manageddb.Configure(cfg); err != nil {
+			log.Errorf("failed to configure managed sqlite store: %v", err)
+			return
+		}
+		if store := manageddb.Default(); store != nil {
+			if keys, pricing, err := store.LoadManagedConfig(context.Background()); err == nil {
+				cfg.APIKeys = keys
+				cfg.ModelPricing = pricing
+			}
+		}
+	}
 
 	// In cloud deploy mode, check if we have a valid configuration
 	var configFileExists bool
@@ -495,6 +558,8 @@ func main() {
 	// Register the shared token store once so all components use the same persistence backend.
 	if usePostgresStore {
 		sdkAuth.RegisterTokenStore(pgStoreInst)
+	} else if useSQLiteStore {
+		sdkAuth.RegisterTokenStore(sdkAuth.NewFileTokenStore())
 	} else if useObjectStore {
 		sdkAuth.RegisterTokenStore(objectStoreInst)
 	} else if useGitStore {

@@ -3,6 +3,7 @@
 package management
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/billing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/manageddb"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -110,6 +112,14 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 // SetConfig updates the in-memory config reference when the server hot-reloads.
 func (h *Handler) SetConfig(cfg *config.Config) {
 	h.cfg = cfg
+	if manageddb.Enabled() {
+		if store := manageddb.Default(); store != nil {
+			if keys, pricing, err := store.LoadManagedConfig(callerContext()); err == nil {
+				h.cfg.APIKeys = keys
+				h.cfg.ModelPricing = pricing
+			}
+		}
+	}
 	if h.billingManager != nil {
 		h.billingManager.SetConfig(cfg, h.configFilePath)
 	}
@@ -146,6 +156,10 @@ func (h *Handler) SetBillingManager(manager *billing.Manager) {
 	if manager != nil {
 		h.billingManager = manager
 	}
+}
+
+func callerContext() context.Context {
+	return context.Background()
 }
 
 // Middleware enforces access control for management endpoints.
@@ -290,6 +304,10 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 func (h *Handler) persist(c *gin.Context) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if manageddb.Enabled() {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		return true
+	}
 	// Preserve comments when writing
 	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})

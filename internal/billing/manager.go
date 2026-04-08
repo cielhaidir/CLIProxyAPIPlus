@@ -14,29 +14,15 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/manageddb"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/managedtypes"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
-type LedgerEntry struct {
-	ID              string `json:"id"`
-	APIKey          string `json:"api-key"`
-	Type            string `json:"type"`
-	Amount          int64  `json:"amount"`
-	Currency        string `json:"currency"`
-	Model           string `json:"model,omitempty"`
-	RequestID       string `json:"request-id,omitempty"`
-	InputTokens     int64  `json:"input-tokens,omitempty"`
-	OutputTokens    int64  `json:"output-tokens,omitempty"`
-	ReasoningTokens int64  `json:"reasoning-tokens,omitempty"`
-	Description     string `json:"description,omitempty"`
-	CreatedAt       string `json:"created-at"`
-	CreatedBy       string `json:"created-by,omitempty"`
-}
-
 type ledgerFile struct {
-	Entries []LedgerEntry `json:"entries"`
+	Entries []managedtypes.LedgerEntry `json:"entries"`
 }
 
 type Overview struct {
@@ -54,7 +40,7 @@ type Manager struct {
 	cfg            *config.Config
 	configFilePath string
 	ledgerPath     string
-	entries        []LedgerEntry
+	entries        []managedtypes.LedgerEntry
 }
 
 var (
@@ -96,13 +82,20 @@ func (m *Manager) SetConfig(cfg *config.Config, configFilePath string) {
 	defaultManagerMu.Unlock()
 }
 
-func (m *Manager) Ledger(apiKey string) []LedgerEntry {
+func (m *Manager) Ledger(apiKey string) []managedtypes.LedgerEntry {
 	if m == nil {
 		return nil
 	}
+	if manageddb.Enabled() {
+		if store := manageddb.Default(); store != nil {
+			if entries, err := store.Ledger(context.Background(), apiKey); err == nil {
+				return entries
+			}
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	filtered := make([]LedgerEntry, 0, len(m.entries))
+	filtered := make([]managedtypes.LedgerEntry, 0, len(m.entries))
 	for i := len(m.entries) - 1; i >= 0; i-- {
 		if apiKey == "" || strings.EqualFold(m.entries[i].APIKey, apiKey) {
 			filtered = append(filtered, m.entries[i])
@@ -121,6 +114,14 @@ func (m *Manager) Overview() Overview {
 	if m.cfg == nil {
 		return overview
 	}
+	if manageddb.Enabled() {
+		if store := manageddb.Default(); store != nil {
+			if keys, pricing, err := store.LoadManagedConfig(context.Background()); err == nil {
+				m.cfg.APIKeys = keys
+				m.cfg.ModelPricing = pricing
+			}
+		}
+	}
 	overview.ClientAPIKeys = append([]config.ClientAPIKey(nil), m.cfg.APIKeys...)
 	overview.ModelPricing = append([]config.ModelPricing(nil), m.cfg.ModelPricing...)
 	for _, entry := range m.cfg.APIKeys {
@@ -132,7 +133,7 @@ func (m *Manager) Overview() Overview {
 }
 
 func (m *Manager) TopUp(apiKey string, amount int64, createdBy, description string) (*config.ClientAPIKey, error) {
-	return m.applyManualEntry(apiKey, LedgerEntry{
+	return m.applyManualEntry(apiKey, managedtypes.LedgerEntry{
 		Type:        "topup",
 		Amount:      amount,
 		Currency:    "USD",
@@ -142,7 +143,7 @@ func (m *Manager) TopUp(apiKey string, amount int64, createdBy, description stri
 }
 
 func (m *Manager) Adjust(apiKey string, amount int64, createdBy, description string) (*config.ClientAPIKey, error) {
-	return m.applyManualEntry(apiKey, LedgerEntry{
+	return m.applyManualEntry(apiKey, managedtypes.LedgerEntry{
 		Type:        "adjustment",
 		Amount:      amount,
 		Currency:    "USD",
@@ -174,12 +175,25 @@ func (m *Manager) HandleUsageRecord(ctx context.Context, record coreusage.Record
 	clientKey.TotalSpent += amount
 	setUpdatedAt(clientKey)
 	m.entries = append(m.entries, entry)
+	if manageddb.Enabled() {
+		if store := manageddb.Default(); store != nil {
+			if err := store.AppendLedgerAndApplyBalance(ctx, entry); err != nil {
+				log.WithError(err).WithField("api_key", record.APIKey).Warn("billing: failed to persist usage debit")
+				return
+			}
+			if keys, pricingEntries, err := store.LoadManagedConfig(context.Background()); err == nil {
+				m.cfg.APIKeys = keys
+				m.cfg.ModelPricing = pricingEntries
+			}
+			return
+		}
+	}
 	if err := m.persistLocked(); err != nil {
 		log.WithError(err).WithField("api_key", record.APIKey).Warn("billing: failed to persist usage debit")
 	}
 }
 
-func (m *Manager) applyManualEntry(apiKey string, entry LedgerEntry) (*config.ClientAPIKey, error) {
+func (m *Manager) applyManualEntry(apiKey string, entry managedtypes.LedgerEntry) (*config.ClientAPIKey, error) {
 	if m == nil {
 		return nil, fmt.Errorf("billing manager unavailable")
 	}
@@ -215,6 +229,22 @@ func (m *Manager) applyManualEntry(apiKey string, entry LedgerEntry) (*config.Cl
 	}
 	setUpdatedAt(clientKey)
 	m.entries = append(m.entries, entry)
+	if manageddb.Enabled() {
+		if store := manageddb.Default(); store != nil {
+			if err := store.AppendLedgerAndApplyBalance(context.Background(), entry); err != nil {
+				return nil, err
+			}
+			if keys, _, err := store.LoadManagedConfig(context.Background()); err == nil {
+				m.cfg.APIKeys = keys
+				for i := range m.cfg.APIKeys {
+					if strings.EqualFold(m.cfg.APIKeys[i].Key, apiKey) {
+						clone := m.cfg.APIKeys[i]
+						return &clone, nil
+					}
+				}
+			}
+		}
+	}
 	if err := m.persistLocked(); err != nil {
 		return nil, err
 	}
@@ -222,12 +252,12 @@ func (m *Manager) applyManualEntry(apiKey string, entry LedgerEntry) (*config.Cl
 	return &clone, nil
 }
 
-func (m *Manager) prepareUsageDebitLocked(ctx context.Context, record coreusage.Record, billingModel string, amount int64, pricing *config.ModelPricing) (LedgerEntry, *config.ClientAPIKey, error) {
+func (m *Manager) prepareUsageDebitLocked(ctx context.Context, record coreusage.Record, billingModel string, amount int64, pricing *config.ModelPricing) (managedtypes.LedgerEntry, *config.ClientAPIKey, error) {
 	clientKey, err := m.findClientKeyLocked(record.APIKey)
 	if err != nil {
-		return LedgerEntry{}, nil, err
+		return managedtypes.LedgerEntry{}, nil, err
 	}
-	entry := LedgerEntry{
+	entry := managedtypes.LedgerEntry{
 		ID:              uuid.NewString(),
 		APIKey:          record.APIKey,
 		Type:            "debit",
@@ -353,7 +383,7 @@ func (m *Manager) loadLocked() error {
 	if err := json.Unmarshal(data, &file); err != nil {
 		return err
 	}
-	m.entries = append([]LedgerEntry(nil), file.Entries...)
+	m.entries = append([]managedtypes.LedgerEntry(nil), file.Entries...)
 	return nil
 }
 

@@ -1,12 +1,14 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/manageddb"
 )
 
 // Generic helpers for list[string]
@@ -156,17 +158,17 @@ func (h *Handler) PutAPIKeys(c *gin.Context) {
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
 	type clientAPIKeyPatch struct {
-		Key           *string  `json:"key"`
-		Name          *string  `json:"name"`
-		Enabled       *bool    `json:"enabled"`
+		Key           *string   `json:"key"`
+		Name          *string   `json:"name"`
+		Enabled       *bool     `json:"enabled"`
 		AllowedModels *[]string `json:"allowed-models"`
-		CreditBalance *int64   `json:"credit-balance"`
-		Currency      *string  `json:"currency"`
-		TotalTopup    *int64   `json:"total-topup"`
-		TotalSpent    *int64   `json:"total-spent"`
-		Notes         *string  `json:"notes"`
-		CreatedAt     *string  `json:"created-at"`
-		UpdatedAt     *string  `json:"updated-at"`
+		CreditBalance *int64    `json:"credit-balance"`
+		Currency      *string   `json:"currency"`
+		TotalTopup    *int64    `json:"total-topup"`
+		TotalSpent    *int64    `json:"total-spent"`
+		Notes         *string   `json:"notes"`
+		CreatedAt     *string   `json:"created-at"`
+		UpdatedAt     *string   `json:"updated-at"`
 	}
 	var body struct {
 		Index *int               `json:"index"`
@@ -184,10 +186,32 @@ func (h *Handler) PatchAPIKeys(c *gin.Context) {
 		newKey := strings.TrimSpace(*body.New)
 		for i := range h.cfg.APIKeys {
 			if h.cfg.APIKeys[i].Key == oldKey {
+				oldEntry := h.cfg.APIKeys[i]
 				if newKey == "" {
 					h.cfg.APIKeys = append(h.cfg.APIKeys[:i], h.cfg.APIKeys[i+1:]...)
+					if manageddb.Enabled() {
+						if store := manageddb.Default(); store != nil {
+							if err := store.DeleteClientAPIKey(context.Background(), oldKey); err != nil {
+								c.JSON(500, gin.H{"error": err.Error()})
+								return
+							}
+						}
+					}
 				} else {
 					h.cfg.APIKeys[i].Key = newKey
+					if manageddb.Enabled() {
+						if store := manageddb.Default(); store != nil {
+							if err := store.DeleteClientAPIKey(context.Background(), oldKey); err != nil {
+								c.JSON(500, gin.H{"error": err.Error()})
+								return
+							}
+							oldEntry.Key = newKey
+							if err := store.UpsertClientAPIKey(context.Background(), oldEntry); err != nil {
+								c.JSON(500, gin.H{"error": err.Error()})
+								return
+							}
+						}
+					}
 				}
 				h.cfg.SanitizeClientAPIKeys()
 				h.persist(c)
@@ -279,6 +303,14 @@ func (h *Handler) PatchAPIKeys(c *gin.Context) {
 	}
 	h.cfg.APIKeys[targetIndex] = entry
 	h.cfg.SanitizeClientAPIKeys()
+	if manageddb.Enabled() {
+		if store := manageddb.Default(); store != nil {
+			if err := store.UpsertClientAPIKey(context.Background(), h.cfg.APIKeys[targetIndex]); err != nil {
+				c.JSON(500, gin.H{"error": err.Error()})
+				return
+			}
+		}
+	}
 	h.persist(c)
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
@@ -286,8 +318,17 @@ func (h *Handler) DeleteAPIKeys(c *gin.Context) {
 		var idx int
 		_, err := fmt.Sscanf(idxStr, "%d", &idx)
 		if err == nil && idx >= 0 && idx < len(h.cfg.APIKeys) {
+			removedKey := h.cfg.APIKeys[idx].Key
 			h.cfg.APIKeys = append(h.cfg.APIKeys[:idx], h.cfg.APIKeys[idx+1:]...)
 			h.cfg.SanitizeClientAPIKeys()
+			if manageddb.Enabled() {
+				if store := manageddb.Default(); store != nil {
+					if err := store.DeleteClientAPIKey(context.Background(), removedKey); err != nil {
+						c.JSON(500, gin.H{"error": err.Error()})
+						return
+					}
+				}
+			}
 			h.persist(c)
 			return
 		}
@@ -301,6 +342,14 @@ func (h *Handler) DeleteAPIKeys(c *gin.Context) {
 		}
 		h.cfg.APIKeys = out
 		h.cfg.SanitizeClientAPIKeys()
+		if manageddb.Enabled() {
+			if store := manageddb.Default(); store != nil {
+				if err := store.DeleteClientAPIKey(context.Background(), val); err != nil {
+					c.JSON(500, gin.H{"error": err.Error()})
+					return
+				}
+			}
+		}
 		h.persist(c)
 		return
 	}
@@ -324,6 +373,13 @@ func legacyStringsToClientAPIKeys(keys []string) []config.ClientAPIKey {
 }
 
 func (h *Handler) GetClientAPIKeys(c *gin.Context) {
+	if manageddb.Enabled() {
+		if store := manageddb.Default(); store != nil {
+			if keys, _, err := store.LoadManagedConfig(context.Background()); err == nil {
+				h.cfg.APIKeys = keys
+			}
+		}
+	}
 	c.JSON(200, gin.H{"client-api-keys": h.cfg.APIKeys})
 }
 
@@ -346,6 +402,16 @@ func (h *Handler) PutClientAPIKeys(c *gin.Context) {
 	}
 	h.cfg.APIKeys = append([]config.ClientAPIKey(nil), arr...)
 	h.cfg.SanitizeClientAPIKeys()
+	if manageddb.Enabled() {
+		if store := manageddb.Default(); store != nil {
+			for _, entry := range h.cfg.APIKeys {
+				if err := store.UpsertClientAPIKey(context.Background(), entry); err != nil {
+					c.JSON(500, gin.H{"error": err.Error()})
+					return
+				}
+			}
+		}
+	}
 	h.persist(c)
 }
 
@@ -354,6 +420,13 @@ func (h *Handler) PatchClientAPIKeys(c *gin.Context) { h.PatchAPIKeys(c) }
 func (h *Handler) DeleteClientAPIKeys(c *gin.Context) { h.DeleteAPIKeys(c) }
 
 func (h *Handler) GetModelPricing(c *gin.Context) {
+	if manageddb.Enabled() {
+		if store := manageddb.Default(); store != nil {
+			if _, pricing, err := store.LoadManagedConfig(context.Background()); err == nil {
+				h.cfg.ModelPricing = pricing
+			}
+		}
+	}
 	c.JSON(200, gin.H{"model-pricing": h.cfg.ModelPricing})
 }
 
@@ -376,6 +449,16 @@ func (h *Handler) PutModelPricing(c *gin.Context) {
 	}
 	h.cfg.ModelPricing = append([]config.ModelPricing(nil), arr...)
 	h.cfg.SanitizeModelPricing()
+	if manageddb.Enabled() {
+		if store := manageddb.Default(); store != nil {
+			for _, entry := range h.cfg.ModelPricing {
+				if err := store.UpsertModelPricing(context.Background(), entry); err != nil {
+					c.JSON(500, gin.H{"error": err.Error()})
+					return
+				}
+			}
+		}
+	}
 	h.persist(c)
 }
 
@@ -421,10 +504,19 @@ func (h *Handler) PatchModelPricing(c *gin.Context) {
 	if body.Value.Model != nil {
 		trimmed := strings.TrimSpace(*body.Value.Model)
 		if trimmed == "" {
+			removedModel := h.cfg.ModelPricing[targetIndex].Model
 			h.cfg.ModelPricing = append(h.cfg.ModelPricing[:targetIndex], h.cfg.ModelPricing[targetIndex+1:]...)
-				h.cfg.SanitizeModelPricing()
-				h.persist(c)
-				return
+			h.cfg.SanitizeModelPricing()
+			if manageddb.Enabled() {
+				if store := manageddb.Default(); store != nil {
+					if err := store.DeleteModelPricing(context.Background(), removedModel); err != nil {
+						c.JSON(500, gin.H{"error": err.Error()})
+						return
+					}
+				}
+			}
+			h.persist(c)
+			return
 		}
 		entry.Model = trimmed
 	}
@@ -455,6 +547,14 @@ func (h *Handler) PatchModelPricing(c *gin.Context) {
 	}
 	h.cfg.ModelPricing[targetIndex] = entry
 	h.cfg.SanitizeModelPricing()
+	if manageddb.Enabled() {
+		if store := manageddb.Default(); store != nil {
+			if err := store.UpsertModelPricing(context.Background(), h.cfg.ModelPricing[targetIndex]); err != nil {
+				c.JSON(500, gin.H{"error": err.Error()})
+				return
+			}
+		}
+	}
 	h.persist(c)
 }
 
@@ -472,14 +572,31 @@ func (h *Handler) DeleteModelPricing(c *gin.Context) {
 		}
 		h.cfg.ModelPricing = out
 		h.cfg.SanitizeModelPricing()
+		if manageddb.Enabled() {
+			if store := manageddb.Default(); store != nil {
+				if err := store.DeleteModelPricing(context.Background(), val); err != nil {
+					c.JSON(500, gin.H{"error": err.Error()})
+					return
+				}
+			}
+		}
 		h.persist(c)
 		return
 	}
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
 		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil && idx >= 0 && idx < len(h.cfg.ModelPricing) {
+			removedModel := h.cfg.ModelPricing[idx].Model
 			h.cfg.ModelPricing = append(h.cfg.ModelPricing[:idx], h.cfg.ModelPricing[idx+1:]...)
 			h.cfg.SanitizeModelPricing()
+			if manageddb.Enabled() {
+				if store := manageddb.Default(); store != nil {
+					if err := store.DeleteModelPricing(context.Background(), removedModel); err != nil {
+						c.JSON(500, gin.H{"error": err.Error()})
+						return
+					}
+				}
+			}
 			h.persist(c)
 			return
 		}
