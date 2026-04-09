@@ -694,6 +694,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/models/catalog", s.mgmt.GetModelsCatalog)
 
 		mgmt.GET("/client-api-keys/:id/ledger", s.mgmt.GetClientAPIKeyLedger)
+		mgmt.GET("/client-api-keys/:id/activity", s.mgmt.GetClientAPIKeyActivity)
 		mgmt.POST("/client-api-keys/:id/topups", s.mgmt.PostClientAPIKeyTopup)
 		mgmt.POST("/client-api-keys/:id/adjustments", s.mgmt.PostClientAPIKeyAdjustment)
 		mgmt.GET("/client-api-keys/:id/usage", s.mgmt.GetClientAPIKeyUsage)

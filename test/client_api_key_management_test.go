@@ -46,6 +46,7 @@ func setupClientKeyRouter(h *management.Handler) *gin.Engine {
 		mgmt.PATCH("/model-pricing", h.PatchModelPricing)
 		mgmt.DELETE("/model-pricing", h.DeleteModelPricing)
 		mgmt.GET("/client-api-keys/:id/ledger", h.GetClientAPIKeyLedger)
+		mgmt.GET("/client-api-keys/:id/activity", h.GetClientAPIKeyActivity)
 		mgmt.POST("/client-api-keys/:id/topups", h.PostClientAPIKeyTopup)
 		mgmt.POST("/client-api-keys/:id/adjustments", h.PostClientAPIKeyAdjustment)
 		mgmt.GET("/client-api-keys/:id/usage", h.GetClientAPIKeyUsage)
@@ -173,5 +174,41 @@ func TestClientAPIKeyBillingEndpoints(t *testing.T) {
 	billing := overviewResp["billing"]
 	if int64(billing["total-balance"].(float64)) != 1300 {
 		t.Fatalf("expected total balance 1300, got %#v", billing)
+	}
+}
+
+func TestClientAPIKeyActivityEndpoint(t *testing.T) {
+	h, _ := newClientKeyTestHandler(t)
+	r := setupClientKeyRouter(h)
+
+	topupBody := `{"amount":1500,"created-by":"admin","description":"seed"}`
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/client-api-keys/seed-key/topups", bytes.NewBufferString(topupBody))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected topup 200, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/client-api-keys/seed-key/activity?page=1&page_size=10", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected activity 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Items      []map[string]any `json:"items"`
+		Pagination map[string]any   `json:"pagination"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal activity response: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("expected 1 activity row, got %#v", resp)
+	}
+	if resp.Items[0]["kind"] != "ledger" {
+		t.Fatalf("expected ledger kind, got %#v", resp.Items[0])
+	}
+	if int(resp.Pagination["total"].(float64)) != 1 {
+		t.Fatalf("expected total 1, got %#v", resp.Pagination)
 	}
 }
