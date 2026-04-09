@@ -71,7 +71,12 @@ func Configure(cfg *config.Config) error {
 		_ = db.Close()
 		return err
 	}
+	if err := s.ensureBillingScaleV2(context.Background()); err != nil {
+		_ = db.Close()
+		return err
+	}
 	if cfg != nil {
+		cfg.MigrateBillingAmountsToScaleV2()
 		if err := s.bootstrapManagedData(cfg); err != nil {
 			_ = db.Close()
 			return err
@@ -137,6 +142,10 @@ func (s *Store) ensureSchema() error {
 			snapshot_json TEXT NOT NULL DEFAULT '',
 			updated_at TEXT NOT NULL DEFAULT ''
 		)`,
+		`CREATE TABLE IF NOT EXISTS managed_metadata (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL DEFAULT ''
+		)`,
 	}
 	for _, q := range queries {
 		if _, err := s.db.Exec(q); err != nil {
@@ -144,6 +153,41 @@ func (s *Store) ensureSchema() error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) ensureBillingScaleV2(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	var current string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM managed_metadata WHERE key = 'billing_scale_version'`).Scan(&current)
+	if err == nil {
+		if strings.TrimSpace(current) == "2" {
+			return nil
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err = tx.ExecContext(ctx, `UPDATE client_api_keys SET credit_balance = credit_balance * 100, total_topup = total_topup * 100, total_spent = total_spent * 100`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE model_pricing SET input_price = input_price * 100, output_price = output_price * 100, reasoning_price = reasoning_price * 100, cached_input_price = cached_input_price * 100, request_price = request_price * 100`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE billing_ledger SET amount = amount * 100`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO managed_metadata (key, value) VALUES ('billing_scale_version', '2') ON CONFLICT(key) DO UPDATE SET value = excluded.value`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) bootstrapManagedData(cfg *config.Config) error {

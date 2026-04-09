@@ -43,6 +43,11 @@ type Manager struct {
 	entries        []managedtypes.LedgerEntry
 }
 
+const (
+	billingMinorUnitsPerUSD = int64(10000)
+	perMillionTokens        = int64(1000000)
+)
+
 var (
 	defaultManagerMu sync.Mutex
 	defaultManager   *Manager
@@ -69,6 +74,9 @@ func (m *Manager) SetConfig(cfg *config.Config, configFilePath string) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if cfg != nil && cfg.MigrateBillingAmountsToScaleV2() {
+		log.Info("billing: migrated config billing amounts to scale version 2")
+	}
 	m.cfg = cfg
 	m.configFilePath = strings.TrimSpace(configFilePath)
 	m.ledgerPath = resolveLedgerPath(m.configFilePath)
@@ -325,29 +333,29 @@ func calculateUsageCost(detail coreusage.Detail, pricing *config.ModelPricing) i
 	} else if detail.CachedTokens >= inputTokens {
 		inputTokens = 0
 	}
-	totalMicroCents := pricing.RequestPrice * 1000000
-	totalMicroCents += scalePerMillionMicroCents(inputTokens, pricing.InputPrice)
-	totalMicroCents += scalePerMillionMicroCents(detail.CachedTokens, pricing.CachedInputPrice)
-	totalMicroCents += scalePerMillionMicroCents(detail.OutputTokens, pricing.OutputPrice)
-	totalMicroCents += scalePerMillionMicroCents(detail.ReasoningTokens, pricing.ReasoningPrice)
-	return roundMicroCentsToCents(totalMicroCents)
+	totalScaledMinorUnits := pricing.RequestPrice * perMillionTokens
+	totalScaledMinorUnits += scalePerMillionMinorUnits(inputTokens, pricing.InputPrice)
+	totalScaledMinorUnits += scalePerMillionMinorUnits(detail.CachedTokens, pricing.CachedInputPrice)
+	totalScaledMinorUnits += scalePerMillionMinorUnits(detail.OutputTokens, pricing.OutputPrice)
+	totalScaledMinorUnits += scalePerMillionMinorUnits(detail.ReasoningTokens, pricing.ReasoningPrice)
+	return roundScaledMinorUnits(totalScaledMinorUnits)
 }
 
-func scalePerMillionMicroCents(tokens, price int64) int64 {
+func scalePerMillionMinorUnits(tokens, price int64) int64 {
 	if tokens <= 0 || price <= 0 {
 		return 0
 	}
 	return tokens * price
 }
 
-func roundMicroCentsToCents(amount int64) int64 {
+func roundScaledMinorUnits(amount int64) int64 {
 	if amount == 0 {
 		return 0
 	}
 	if amount > 0 {
-		return (amount + 500000) / 1000000
+		return (amount + perMillionTokens/2) / perMillionTokens
 	}
-	return (amount - 500000) / 1000000
+	return (amount - perMillionTokens/2) / perMillionTokens
 }
 
 func (m *Manager) findClientKeyLocked(apiKey string) (*config.ClientAPIKey, error) {

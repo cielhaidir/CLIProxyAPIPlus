@@ -30,6 +30,10 @@ type SDKConfig struct {
 	// ModelPricing defines per-model usage pricing configuration.
 	ModelPricing []ModelPricing `yaml:"model-pricing,omitempty" json:"model-pricing,omitempty"`
 
+	// BillingScaleVersion tracks the storage scale used by billing-related integer amounts.
+	// Version 2 stores balances and ledger amounts in 0.0001 USD minor units.
+	BillingScaleVersion int `yaml:"billing-scale-version,omitempty" json:"billing-scale-version,omitempty"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`

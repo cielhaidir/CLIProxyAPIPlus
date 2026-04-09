@@ -763,6 +763,7 @@ func (cfg *Config) SanitizeClientAPIKeys() {
 	if cfg == nil {
 		return
 	}
+	cfg.ensureBillingScaleVersion()
 	seen := make(map[string]struct{}, len(cfg.APIKeys))
 	out := make([]ClientAPIKey, 0, len(cfg.APIKeys))
 	for i := range cfg.APIKeys {
@@ -808,6 +809,7 @@ func (cfg *Config) SanitizeModelPricing() {
 	if cfg == nil {
 		return
 	}
+	cfg.ensureBillingScaleVersion()
 	seen := make(map[string]struct{}, len(cfg.ModelPricing))
 	out := make([]ModelPricing, 0, len(cfg.ModelPricing))
 	for i := range cfg.ModelPricing {
@@ -851,6 +853,63 @@ func (cfg *Config) SanitizeModelPricing() {
 		out = append(out, entry)
 	}
 	cfg.ModelPricing = out
+}
+
+func (cfg *Config) ensureBillingScaleVersion() {
+	if cfg == nil {
+		return
+	}
+	if cfg.BillingScaleVersion < 0 {
+		cfg.BillingScaleVersion = 2
+	}
+}
+
+func (cfg *Config) MigrateBillingAmountsToScaleV2() bool {
+	if cfg == nil {
+		return false
+	}
+	if cfg.BillingScaleVersion >= 2 {
+		return false
+	}
+	if cfg.BillingScaleVersion == 0 && !cfg.looksLikeLegacyBillingScaleV1() {
+		cfg.BillingScaleVersion = 2
+		return false
+	}
+	for i := range cfg.APIKeys {
+		cfg.APIKeys[i].CreditBalance *= 100
+		cfg.APIKeys[i].TotalTopup *= 100
+		cfg.APIKeys[i].TotalSpent *= 100
+	}
+	for i := range cfg.ModelPricing {
+		cfg.ModelPricing[i].InputPrice *= 100
+		cfg.ModelPricing[i].OutputPrice *= 100
+		cfg.ModelPricing[i].ReasoningPrice *= 100
+		cfg.ModelPricing[i].CachedInputPrice *= 100
+		cfg.ModelPricing[i].RequestPrice *= 100
+	}
+	cfg.BillingScaleVersion = 2
+	return true
+}
+
+func (cfg *Config) looksLikeLegacyBillingScaleV1() bool {
+	if cfg == nil {
+		return false
+	}
+	for _, entry := range cfg.ModelPricing {
+		if isLikelyLegacyBillingValue(entry.InputPrice) || isLikelyLegacyBillingValue(entry.OutputPrice) || isLikelyLegacyBillingValue(entry.ReasoningPrice) || isLikelyLegacyBillingValue(entry.CachedInputPrice) || isLikelyLegacyBillingValue(entry.RequestPrice) {
+			return true
+		}
+	}
+	for _, entry := range cfg.APIKeys {
+		if isLikelyLegacyBillingValue(entry.CreditBalance) || isLikelyLegacyBillingValue(entry.TotalTopup) || isLikelyLegacyBillingValue(entry.TotalSpent) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLikelyLegacyBillingValue(value int64) bool {
+	return value > 0 && value <= 10000
 }
 
 func normalizeUniqueStrings(values []string, lowercase bool) []string {

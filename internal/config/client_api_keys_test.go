@@ -72,3 +72,47 @@ func TestSaveConfigPreserveComments_ClientAPIKeyObjects(t *testing.T) {
 		t.Fatalf("expected no model pricing entries, got %#v", reloaded.ModelPricing)
 	}
 }
+
+func TestMigrateBillingAmountsToScaleV2(t *testing.T) {
+	enabled := true
+	cfg := &Config{}
+	cfg.BillingScaleVersion = 1
+	cfg.APIKeys = []ClientAPIKey{{
+		Key:           "client-key-1",
+		Enabled:       &enabled,
+		Currency:      "USD",
+		CreditBalance: 936,
+		TotalTopup:    1000,
+		TotalSpent:    64,
+	}}
+	cfg.ModelPricing = []ModelPricing{{
+		Model:       "gpt-5-4",
+		Currency:    "USD",
+		InputPrice:  100,
+		OutputPrice: 750,
+		Enabled:     &enabled,
+	}}
+
+	migrated := cfg.MigrateBillingAmountsToScaleV2()
+	if !migrated {
+		t.Fatal("expected migration to run")
+	}
+	if cfg.BillingScaleVersion != 2 {
+		t.Fatalf("billing scale version = %d, want 2", cfg.BillingScaleVersion)
+	}
+	if cfg.APIKeys[0].CreditBalance != 93600 {
+		t.Fatalf("credit balance = %d, want 93600", cfg.APIKeys[0].CreditBalance)
+	}
+	if cfg.APIKeys[0].TotalTopup != 100000 {
+		t.Fatalf("total topup = %d, want 100000", cfg.APIKeys[0].TotalTopup)
+	}
+	if cfg.APIKeys[0].TotalSpent != 6400 {
+		t.Fatalf("total spent = %d, want 6400", cfg.APIKeys[0].TotalSpent)
+	}
+	if cfg.ModelPricing[0].InputPrice != 10000 {
+		t.Fatalf("input price = %d, want 10000", cfg.ModelPricing[0].InputPrice)
+	}
+	if cfg.ModelPricing[0].OutputPrice != 75000 {
+		t.Fatalf("output price = %d, want 75000", cfg.ModelPricing[0].OutputPrice)
+	}
+}
