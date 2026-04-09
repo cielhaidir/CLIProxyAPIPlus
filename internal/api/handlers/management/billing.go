@@ -9,19 +9,16 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managedtypes"
-	usagepkg "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
 type activityRow struct {
 	ID           string `json:"id"`
-	Kind         string `json:"kind"`
 	Time         string `json:"time"`
 	Model        string `json:"model"`
-	Amount       *int64 `json:"amount"`
+	Amount       int64  `json:"amount"`
 	InputTokens  int64  `json:"input_tokens"`
 	OutputTokens int64  `json:"output_tokens"`
 	TotalTokens  int64  `json:"total_tokens"`
-	Source       string `json:"source"`
 	SortUnix     int64  `json:"-"`
 }
 
@@ -129,13 +126,9 @@ func (h *Handler) GetClientAPIKeyActivity(c *gin.Context) {
 	rows := make([]activityRow, 0)
 	if h != nil && h.billingManager != nil {
 		for _, entry := range h.billingManager.Ledger(apiKey) {
-			rows = append(rows, ledgerToActivityRow(entry))
-		}
-	}
-	if h != nil && h.usageStats != nil {
-		snapshot := h.usageStats.Snapshot()
-		if api, ok := snapshot.APIs[apiKey]; ok {
-			rows = append(rows, usageToActivityRows(api)...)
+			if entry.Type == "debit" {
+				rows = append(rows, ledgerToActivityRow(entry))
+			}
 		}
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -186,41 +179,17 @@ func (h *Handler) GetBillingOverview(c *gin.Context) {
 func ledgerToActivityRow(entry managedtypes.LedgerEntry) activityRow {
 	timeValue := strings.TrimSpace(entry.CreatedAt)
 	sortUnix := parseTimeUnix(timeValue)
-	amount := entry.Amount
-	totalTokens := entry.InputTokens + entry.OutputTokens
+	totalTokens := entry.InputTokens + entry.OutputTokens + entry.ReasoningTokens
 	return activityRow{
 		ID:           "ledger-" + entry.ID,
-		Kind:         "ledger",
 		Time:         timeValue,
 		Model:        entry.Model,
-		Amount:       &amount,
+		Amount:       entry.Amount,
 		InputTokens:  entry.InputTokens,
 		OutputTokens: entry.OutputTokens,
 		TotalTokens:  totalTokens,
-		Source:       entry.CreatedBy,
 		SortUnix:     sortUnix,
 	}
-}
-
-func usageToActivityRows(api usagepkg.APISnapshot) []activityRow {
-	rows := make([]activityRow, 0)
-	for modelName, modelSnapshot := range api.Models {
-		for idx, detail := range modelSnapshot.Details {
-			rows = append(rows, activityRow{
-				ID:           "usage-" + modelName + "-" + strconv.Itoa(idx) + "-" + detail.Timestamp.UTC().Format(time.RFC3339Nano),
-				Kind:         "usage",
-				Time:         detail.Timestamp.Format(time.RFC3339),
-				Model:        modelName,
-				Amount:       nil,
-				InputTokens:  detail.Tokens.InputTokens,
-				OutputTokens: detail.Tokens.OutputTokens,
-				TotalTokens:  detail.Tokens.TotalTokens,
-				Source:       detail.Source,
-				SortUnix:     detail.Timestamp.UnixNano(),
-			})
-		}
-	}
-	return rows
 }
 
 func parseTimeUnix(value string) int64 {

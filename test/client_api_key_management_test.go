@@ -2,6 +2,7 @@ package test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +12,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/management"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/billing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 func newClientKeyTestHandler(t *testing.T) (*management.Handler, string) {
@@ -178,18 +181,23 @@ func TestClientAPIKeyBillingEndpoints(t *testing.T) {
 }
 
 func TestClientAPIKeyActivityEndpoint(t *testing.T) {
-	h, _ := newClientKeyTestHandler(t)
+	h, configPath := newClientKeyTestHandler(t)
+	enabled := true
+	cfg := &config.Config{SDKConfig: config.SDKConfig{
+		APIKeys:      []config.ClientAPIKey{{Key: "seed-key", Enabled: &enabled, Currency: "USD", CreditBalance: 5000}},
+		ModelPricing: []config.ModelPricing{{Model: "gpt-4.1", Currency: "USD", InputPrice: 200, OutputPrice: 800, Enabled: &enabled}},
+	}}
+	h.SetConfig(cfg)
+	bm := billing.NewManager(cfg, configPath)
+	h.SetBillingManager(bm)
+	bm.HandleUsageRecord(context.Background(), coreusage.Record{
+		APIKey: "seed-key",
+		Model:  "gpt-4.1",
+		Detail: coreusage.Detail{InputTokens: 1000000, OutputTokens: 1000000, TotalTokens: 2000000},
+	})
 	r := setupClientKeyRouter(h)
-
-	topupBody := `{"amount":1500,"created-by":"admin","description":"seed"}`
-	req := httptest.NewRequest(http.MethodPost, "/v0/management/client-api-keys/seed-key/topups", bytes.NewBufferString(topupBody))
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/client-api-keys/seed-key/activity?page=1&page_size=10", nil)
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected topup 200, got %d body=%s", w.Code, w.Body.String())
-	}
-
-	req = httptest.NewRequest(http.MethodGet, "/v0/management/client-api-keys/seed-key/activity?page=1&page_size=10", nil)
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -205,8 +213,8 @@ func TestClientAPIKeyActivityEndpoint(t *testing.T) {
 	if len(resp.Items) != 1 {
 		t.Fatalf("expected 1 activity row, got %#v", resp)
 	}
-	if resp.Items[0]["kind"] != "ledger" {
-		t.Fatalf("expected ledger kind, got %#v", resp.Items[0])
+	if int64(resp.Items[0]["amount"].(float64)) >= 0 {
+		t.Fatalf("expected debit amount, got %#v", resp.Items[0])
 	}
 	if int(resp.Pagination["total"].(float64)) != 1 {
 		t.Fatalf("expected total 1, got %#v", resp.Pagination)
