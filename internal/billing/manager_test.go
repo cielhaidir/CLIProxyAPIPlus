@@ -117,6 +117,44 @@ func TestManagerUsageDebitUsesResolvedBillingModel(t *testing.T) {
 	}
 }
 
+func TestCalculateUsageCostRoundsAfterSummingComponents(t *testing.T) {
+	pricingEnabled := true
+	pricing := &config.ModelPricing{
+		Model:       "gpt-5-4",
+		Currency:    "USD",
+		InputPrice:  100,
+		OutputPrice: 750,
+		Enabled:     &pricingEnabled,
+	}
+
+	amount := calculateUsageCost(coreusage.Detail{
+		InputTokens:  93834,
+		OutputTokens: 192,
+	}, pricing)
+
+	if amount != 10 {
+		t.Fatalf("amount = %d, want 10", amount)
+	}
+}
+
+func TestCalculateUsageCostKeepsSubCentTotalsBelowHalfCentAtZero(t *testing.T) {
+	pricingEnabled := true
+	pricing := &config.ModelPricing{
+		Model:      "gpt-5-4",
+		Currency:   "USD",
+		InputPrice: 100,
+		Enabled:    &pricingEnabled,
+	}
+
+	amount := calculateUsageCost(coreusage.Detail{
+		InputTokens: 4999,
+	}, pricing)
+
+	if amount != 0 {
+		t.Fatalf("amount = %d, want 0", amount)
+	}
+}
+
 func TestManagerTopUpAndDebitWithSQLiteStore(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "runtime.db")

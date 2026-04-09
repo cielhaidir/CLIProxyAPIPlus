@@ -325,19 +325,29 @@ func calculateUsageCost(detail coreusage.Detail, pricing *config.ModelPricing) i
 	} else if detail.CachedTokens >= inputTokens {
 		inputTokens = 0
 	}
-	amount := pricing.RequestPrice
-	amount += scalePerMillion(inputTokens, pricing.InputPrice)
-	amount += scalePerMillion(detail.CachedTokens, pricing.CachedInputPrice)
-	amount += scalePerMillion(detail.OutputTokens, pricing.OutputPrice)
-	amount += scalePerMillion(detail.ReasoningTokens, pricing.ReasoningPrice)
-	return amount
+	totalMicroCents := pricing.RequestPrice * 1000000
+	totalMicroCents += scalePerMillionMicroCents(inputTokens, pricing.InputPrice)
+	totalMicroCents += scalePerMillionMicroCents(detail.CachedTokens, pricing.CachedInputPrice)
+	totalMicroCents += scalePerMillionMicroCents(detail.OutputTokens, pricing.OutputPrice)
+	totalMicroCents += scalePerMillionMicroCents(detail.ReasoningTokens, pricing.ReasoningPrice)
+	return roundMicroCentsToCents(totalMicroCents)
 }
 
-func scalePerMillion(tokens, price int64) int64 {
+func scalePerMillionMicroCents(tokens, price int64) int64 {
 	if tokens <= 0 || price <= 0 {
 		return 0
 	}
-	return (tokens*price + 500000) / 1000000
+	return tokens * price
+}
+
+func roundMicroCentsToCents(amount int64) int64 {
+	if amount == 0 {
+		return 0
+	}
+	if amount > 0 {
+		return (amount + 500000) / 1000000
+	}
+	return (amount - 500000) / 1000000
 }
 
 func (m *Manager) findClientKeyLocked(apiKey string) (*config.ClientAPIKey, error) {
