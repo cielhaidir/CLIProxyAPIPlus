@@ -12,14 +12,16 @@ import (
 )
 
 type activityRow struct {
-	ID           string `json:"id"`
-	Time         string `json:"time"`
-	Model        string `json:"model"`
-	Amount       int64  `json:"amount"`
-	InputTokens  int64  `json:"input_tokens"`
-	OutputTokens int64  `json:"output_tokens"`
-	TotalTokens  int64  `json:"total_tokens"`
-	SortUnix     int64  `json:"-"`
+	ID              string `json:"id"`
+	Time            string `json:"time"`
+	Model           string `json:"model"`
+	Amount          int64  `json:"amount"`
+	InputTokens     int64  `json:"input_tokens"`
+	OutputTokens    int64  `json:"output_tokens"`
+	ReasoningTokens int64  `json:"reasoning_tokens"`
+	CachedTokens    int64  `json:"cached_tokens"`
+	TotalTokens     int64  `json:"total_tokens"`
+	SortUnix        int64  `json:"-"`
 }
 
 func (h *Handler) GetClientAPIKeyLedger(c *gin.Context) {
@@ -181,14 +183,16 @@ func ledgerToActivityRow(entry managedtypes.LedgerEntry) activityRow {
 	sortUnix := parseTimeUnix(timeValue)
 	totalTokens := entry.InputTokens + entry.OutputTokens + entry.ReasoningTokens
 	return activityRow{
-		ID:           "ledger-" + entry.ID,
-		Time:         timeValue,
-		Model:        entry.Model,
-		Amount:       entry.Amount,
-		InputTokens:  entry.InputTokens,
-		OutputTokens: entry.OutputTokens,
-		TotalTokens:  totalTokens,
-		SortUnix:     sortUnix,
+		ID:              "ledger-" + entry.ID,
+		Time:            timeValue,
+		Model:           entry.Model,
+		Amount:          entry.Amount,
+		InputTokens:     entry.InputTokens,
+		OutputTokens:    entry.OutputTokens,
+		ReasoningTokens: entry.ReasoningTokens,
+		CachedTokens:    0,
+		TotalTokens:     totalTokens,
+		SortUnix:        sortUnix,
 	}
 }
 
