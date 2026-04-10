@@ -181,7 +181,7 @@ func (h *Handler) GetBillingOverview(c *gin.Context) {
 func ledgerToActivityRow(entry managedtypes.LedgerEntry) activityRow {
 	timeValue := strings.TrimSpace(entry.CreatedAt)
 	sortUnix := parseTimeUnix(timeValue)
-	totalTokens := entry.InputTokens + entry.OutputTokens + entry.ReasoningTokens
+	totalTokens := entry.InputTokens + entry.OutputTokens + entry.ReasoningTokens + entry.CachedTokens
 	return activityRow{
 		ID:              "ledger-" + entry.ID,
 		Time:            timeValue,
@@ -190,7 +190,7 @@ func ledgerToActivityRow(entry managedtypes.LedgerEntry) activityRow {
 		InputTokens:     entry.InputTokens,
 		OutputTokens:    entry.OutputTokens,
 		ReasoningTokens: entry.ReasoningTokens,
-		CachedTokens:    0,
+		CachedTokens:    entry.CachedTokens,
 		TotalTokens:     totalTokens,
 		SortUnix:        sortUnix,
 	}

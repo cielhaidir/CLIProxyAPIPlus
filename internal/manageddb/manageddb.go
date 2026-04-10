@@ -133,6 +133,7 @@ func (s *Store) ensureSchema() error {
 			input_tokens INTEGER NOT NULL DEFAULT 0,
 			output_tokens INTEGER NOT NULL DEFAULT 0,
 			reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+			cached_tokens INTEGER NOT NULL DEFAULT 0,
 			description TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
 			created_by TEXT NOT NULL DEFAULT ''
@@ -151,6 +152,9 @@ func (s *Store) ensureSchema() error {
 		if _, err := s.db.Exec(q); err != nil {
 			return err
 		}
+	}
+	if _, err := s.db.Exec(`ALTER TABLE billing_ledger ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
 	}
 	return nil
 }
@@ -347,7 +351,7 @@ func (s *Store) AppendLedgerAndApplyBalance(ctx context.Context, entry managedty
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err = tx.ExecContext(ctx, `INSERT INTO billing_ledger (id, api_key, entry_type, amount, currency, model, request_id, input_tokens, output_tokens, reasoning_tokens, description, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, entry.ID, entry.APIKey, entry.Type, entry.Amount, defaultCurrency(entry.Currency), entry.Model, entry.RequestID, entry.InputTokens, entry.OutputTokens, entry.ReasoningTokens, entry.Description, entry.CreatedAt, entry.CreatedBy); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO billing_ledger (id, api_key, entry_type, amount, currency, model, request_id, input_tokens, output_tokens, reasoning_tokens, cached_tokens, description, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, entry.ID, entry.APIKey, entry.Type, entry.Amount, defaultCurrency(entry.Currency), entry.Model, entry.RequestID, entry.InputTokens, entry.OutputTokens, entry.ReasoningTokens, entry.CachedTokens, entry.Description, entry.CreatedAt, entry.CreatedBy); err != nil {
 		return err
 	}
 	if entry.Type == "topup" {
@@ -365,7 +369,7 @@ func (s *Store) AppendLedgerAndApplyBalance(ctx context.Context, entry managedty
 }
 
 func (s *Store) Ledger(ctx context.Context, apiKey string) ([]managedtypes.LedgerEntry, error) {
-	query := `SELECT id, api_key, entry_type, amount, currency, model, request_id, input_tokens, output_tokens, reasoning_tokens, description, created_at, created_by FROM billing_ledger`
+	query := `SELECT id, api_key, entry_type, amount, currency, model, request_id, input_tokens, output_tokens, reasoning_tokens, cached_tokens, description, created_at, created_by FROM billing_ledger`
 	args := []any{}
 	if strings.TrimSpace(apiKey) != "" {
 		query += ` WHERE api_key = ?`
@@ -380,7 +384,7 @@ func (s *Store) Ledger(ctx context.Context, apiKey string) ([]managedtypes.Ledge
 	out := []managedtypes.LedgerEntry{}
 	for rows.Next() {
 		var entry managedtypes.LedgerEntry
-		if err := rows.Scan(&entry.ID, &entry.APIKey, &entry.Type, &entry.Amount, &entry.Currency, &entry.Model, &entry.RequestID, &entry.InputTokens, &entry.OutputTokens, &entry.ReasoningTokens, &entry.Description, &entry.CreatedAt, &entry.CreatedBy); err != nil {
+		if err := rows.Scan(&entry.ID, &entry.APIKey, &entry.Type, &entry.Amount, &entry.Currency, &entry.Model, &entry.RequestID, &entry.InputTokens, &entry.OutputTokens, &entry.ReasoningTokens, &entry.CachedTokens, &entry.Description, &entry.CreatedAt, &entry.CreatedBy); err != nil {
 			return nil, err
 		}
 		out = append(out, entry)

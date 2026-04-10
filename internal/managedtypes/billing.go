@@ -11,6 +11,7 @@ type LedgerEntry struct {
 	InputTokens     int64  `json:"input-tokens,omitempty"`
 	OutputTokens    int64  `json:"output-tokens,omitempty"`
 	ReasoningTokens int64  `json:"reasoning-tokens,omitempty"`
+	CachedTokens    int64  `json:"cached-tokens,omitempty"`
 	Description     string `json:"description,omitempty"`
 	CreatedAt       string `json:"created-at"`
 	CreatedBy       string `json:"created-by,omitempty"`

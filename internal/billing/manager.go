@@ -276,6 +276,7 @@ func (m *Manager) prepareUsageDebitLocked(ctx context.Context, record coreusage.
 		InputTokens:     record.Detail.InputTokens,
 		OutputTokens:    record.Detail.OutputTokens,
 		ReasoningTokens: record.Detail.ReasoningTokens,
+		CachedTokens:    record.Detail.CachedTokens,
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 		CreatedBy:       "usage-billing",
 		Description:     fmt.Sprintf("usage debit for model %s", strings.TrimSpace(billingModel)),
