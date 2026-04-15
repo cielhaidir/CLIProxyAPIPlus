@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -74,6 +75,28 @@ func newManagedKeyTestServer(t *testing.T, entry sdkconfig.ClientAPIKey) *Server
 	accessManager := sdkaccess.NewManager()
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	return NewServer(cfg, authManager, accessManager, configPath)
+}
+
+func TestHealthz(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	var resp struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
+	}
+	if resp.Status != "ok" {
+		t.Fatalf("unexpected response status: got %q want %q", resp.Status, "ok")
+	}
 }
 
 func TestAmpProviderModelRoutes(t *testing.T) {
@@ -199,6 +222,8 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		http.StatusBadGateway,
 		map[string][]string{"Content-Type": []string{"application/json"}},
 		[]byte(`{"error":"upstream failure"}`),
+		nil,
+		nil,
 		nil,
 		nil,
 		nil,
