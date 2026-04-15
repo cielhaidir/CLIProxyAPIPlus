@@ -56,7 +56,6 @@ func main() {
 		{name: "codex-team", models: catalog.CodexTeam},
 		{name: "codex-plus", models: catalog.CodexPlus},
 		{name: "codex-pro", models: catalog.CodexPro},
-		{name: "qwen", models: catalog.Qwen},
 		{name: "iflow", models: catalog.IFlow},
 		{name: "kimi", models: catalog.Kimi},
 		{name: "antigravity", models: catalog.Antigravity},
@@ -75,6 +74,20 @@ func main() {
 			}
 			if _, exists := seen[id]; exists {
 				fail("validate %s: %s contains duplicate model id %q", path, section.name, id)
+			}
+			seen[id] = struct{}{}
+		}
+	}
+
+	if len(catalog.Qwen) > 0 {
+		seen := make(map[string]struct{}, len(catalog.Qwen))
+		for i, model := range catalog.Qwen {
+			id := strings.TrimSpace(model.ID)
+			if id == "" {
+				fail("validate %s: qwen[%d] has empty id", path, i)
+			}
+			if _, exists := seen[id]; exists {
+				fail("validate %s: qwen contains duplicate model id %q", path, id)
 			}
 			seen[id] = struct{}{}
 		}
