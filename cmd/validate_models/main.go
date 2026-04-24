@@ -56,7 +56,6 @@ func main() {
 		{name: "codex-team", models: catalog.CodexTeam},
 		{name: "codex-plus", models: catalog.CodexPlus},
 		{name: "codex-pro", models: catalog.CodexPro},
-		{name: "iflow", models: catalog.IFlow},
 		{name: "kimi", models: catalog.Kimi},
 		{name: "antigravity", models: catalog.Antigravity},
 	}
