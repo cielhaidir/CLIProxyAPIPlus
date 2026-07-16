@@ -91,18 +91,26 @@ func TestClientAPIKeysCRUDAndModelPricing(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/v0/management/client-api-keys", nil)
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
-	var keysResp map[string][]config.ClientAPIKey
+	var keysResp map[string][]map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &keysResp); err != nil {
 		t.Fatalf("failed to unmarshal client keys response: %v", err)
 	}
 	if len(keysResp["client-api-keys"]) != 1 {
 		t.Fatalf("expected 1 client key, got %#v", keysResp)
 	}
-	if keysResp["client-api-keys"][0].Currency != "USD" {
+	if keysResp["client-api-keys"][0]["currency"] != "USD" {
 		t.Fatalf("expected USD currency normalization, got %#v", keysResp["client-api-keys"][0])
 	}
-	if len(keysResp["client-api-keys"][0].AllowedModels) != 1 {
-		t.Fatalf("expected allowed models deduplication, got %#v", keysResp["client-api-keys"][0].AllowedModels)
+	allowedModelsValue, ok := keysResp["client-api-keys"][0]["allowed-models"]
+	if !ok {
+		t.Fatalf("expected allowed-models field, got %#v", keysResp["client-api-keys"][0])
+	}
+	allowedModels, _ := allowedModelsValue.([]any)
+	if len(allowedModels) != 1 {
+		t.Fatalf("expected allowed models deduplication, got %#v", keysResp["client-api-keys"][0]["allowed-models"])
+	}
+	if _, ok := keysResp["client-api-keys"][0]["id"].(string); !ok {
+		t.Fatalf("expected synthetic id in response, got %#v", keysResp["client-api-keys"][0])
 	}
 
 	patchBody := `{"match":"client-key-1","value":{"enabled":false,"notes":"  note  "}}`

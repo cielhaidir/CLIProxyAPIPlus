@@ -301,6 +301,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			h.attemptsMu.Unlock()
 		}
 
+		c.Set("management_handler", h)
 		c.Next()
 	}
 }

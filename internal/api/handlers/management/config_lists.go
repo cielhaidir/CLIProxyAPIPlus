@@ -2,6 +2,8 @@ package management
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -372,6 +374,34 @@ func legacyStringsToClientAPIKeys(keys []string) []config.ClientAPIKey {
 	return out
 }
 
+func clientAPIKeyResponseID(entry config.ClientAPIKey) string {
+	name := strings.TrimSpace(entry.Name)
+	if name != "" {
+		digest := sha256.Sum256([]byte(strings.TrimSpace(entry.Key)))
+		return "name:" + name + ":" + hex.EncodeToString(digest[:4])
+	}
+	digest := sha256.Sum256([]byte(strings.TrimSpace(entry.Key)))
+	return "key:" + hex.EncodeToString(digest[:8])
+}
+
+func clientAPIKeyResponseEntry(entry config.ClientAPIKey) gin.H {
+	return gin.H{
+		"id":              clientAPIKeyResponseID(entry),
+		"key":             entry.Key,
+		"name":            entry.Name,
+		"enabled":         entry.Enabled,
+		"allowed-models":  entry.AllowedModels,
+		"credit-balance":  entry.CreditBalance,
+		"currency":        entry.Currency,
+		"total-topup":     entry.TotalTopup,
+		"total-spent":     entry.TotalSpent,
+		"notes":           entry.Notes,
+		"created-at":      entry.CreatedAt,
+		"updated-at":      entry.UpdatedAt,
+		"filterable-name": strings.TrimSpace(entry.Name) != "",
+	}
+}
+
 func (h *Handler) GetClientAPIKeys(c *gin.Context) {
 	if manageddb.Enabled() {
 		if store := manageddb.Default(); store != nil {
@@ -380,7 +410,11 @@ func (h *Handler) GetClientAPIKeys(c *gin.Context) {
 			}
 		}
 	}
-	c.JSON(200, gin.H{"client-api-keys": h.cfg.APIKeys})
+	items := make([]gin.H, 0, len(h.cfg.APIKeys))
+	for _, entry := range h.cfg.APIKeys {
+		items = append(items, clientAPIKeyResponseEntry(entry))
+	}
+	c.JSON(200, gin.H{"client-api-keys": items})
 }
 
 func (h *Handler) PutClientAPIKeys(c *gin.Context) {
