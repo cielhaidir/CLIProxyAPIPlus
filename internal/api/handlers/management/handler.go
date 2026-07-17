@@ -52,6 +52,7 @@ type Handler struct {
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
 	billingManager      *billing.Manager
+	applyConfig         func(*config.Config)
 }
 
 // NewHandler creates a new management handler instance.
@@ -161,6 +162,10 @@ func (h *Handler) SetBillingManager(manager *billing.Manager) {
 	if manager != nil {
 		h.billingManager = manager
 	}
+}
+
+func (h *Handler) SetConfigApplier(apply func(*config.Config)) {
+	h.applyConfig = apply
 }
 
 func callerContext() context.Context {
@@ -308,17 +313,32 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 
 // persist saves the current in-memory config to disk.
 func (h *Handler) persist(c *gin.Context) bool {
+	return h.persistConfig(c, h.cfg)
+}
+
+func (h *Handler) saveConfigFileLocked(cfg *config.Config) error {
+	if strings.TrimSpace(h.configFilePath) == "" {
+		return nil
+	}
+	return config.SaveConfigPreserveComments(h.configFilePath, cfg)
+}
+
+func (h *Handler) applyPersistedConfig(cfg *config.Config) {
+	if h.applyConfig != nil {
+		h.applyConfig(cfg)
+		return
+	}
+	h.SetConfig(cfg)
+}
+
+func (h *Handler) persistConfig(c *gin.Context, cfg *config.Config) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if manageddb.Enabled() {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-		return true
-	}
-	// Preserve comments when writing
-	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+	if err := h.saveConfigFileLocked(cfg); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}
+	h.applyPersistedConfig(cfg)
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	return true
 }

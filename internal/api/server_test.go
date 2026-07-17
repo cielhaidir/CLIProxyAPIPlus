@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -74,7 +75,13 @@ func newManagedKeyTestServer(t *testing.T, entry sdkconfig.ClientAPIKey) *Server
 	authManager := auth.NewManager(nil, nil, nil)
 	accessManager := sdkaccess.NewManager()
 	configPath := filepath.Join(tmpDir, "config.yaml")
-	return NewServer(cfg, authManager, accessManager, configPath)
+	if err := os.WriteFile(configPath, []byte("port: 0\n"), 0o600); err != nil {
+		t.Fatalf("failed to create initial config file: %v", err)
+	}
+	if err := proxyconfig.SaveConfigPreserveComments(configPath, cfg); err != nil {
+		t.Fatalf("failed to persist initial config: %v", err)
+	}
+	return NewServer(cfg, authManager, accessManager, configPath, WithLocalManagementPassword("test-management-key"))
 }
 
 func TestHealthz(t *testing.T) {
@@ -362,6 +369,55 @@ func TestUnauthorizedModelRejectedOnInferenceEndpoints(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "model not allowed for this api key") {
 		t.Fatalf("expected model restriction message, got %s", rr.Body.String())
+	}
+}
+
+func TestManagementCreateClientAPIKeyPersistsAndAuthenticatesImmediately(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+	enabled := true
+	server := newManagedKeyTestServer(t, sdkconfig.ClientAPIKey{
+		Key:           "seed-key",
+		Enabled:       &enabled,
+		Currency:      "USD",
+		CreditBalance: 100,
+	})
+
+	body := `{"items":[{"key":"new-client-key","enabled":true,"currency":"USD","credit-balance":100}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/client-api-keys", bytes.NewBufferString(body))
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Management-Key", "test-management-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected management create 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	configData, err := os.ReadFile(server.configFilePath)
+	if err != nil {
+		t.Fatalf("failed to read config: %v", err)
+	}
+	if !strings.Contains(string(configData), "new-client-key") {
+		t.Fatalf("expected config file to contain new key, got %s", string(configData))
+	}
+
+	found := false
+	for _, entry := range server.cfg.APIKeys {
+		if entry.Key == "new-client-key" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected runtime config to include new client key immediately")
+	}
+
+	authReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	authReq.Header.Set("Authorization", "Bearer new-client-key")
+	authRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(authRR, authReq)
+	if authRR.Code == http.StatusUnauthorized {
+		t.Fatalf("expected new key to authenticate immediately, got %d body=%s", authRR.Code, authRR.Body.String())
 	}
 }
 

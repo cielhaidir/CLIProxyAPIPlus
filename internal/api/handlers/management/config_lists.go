@@ -434,19 +434,44 @@ func (h *Handler) PutClientAPIKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
-	h.cfg.APIKeys = append([]config.ClientAPIKey(nil), arr...)
-	h.cfg.SanitizeClientAPIKeys()
+
+	nextCfg := *h.cfg
+	nextCfg.APIKeys = append([]config.ClientAPIKey(nil), arr...)
+	nextCfg.SanitizeClientAPIKeys()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := h.saveConfigFileLocked(&nextCfg); err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
+		return
+	}
 	if manageddb.Enabled() {
 		if store := manageddb.Default(); store != nil {
+			currentKeys := make(map[string]struct{}, len(h.cfg.APIKeys))
 			for _, entry := range h.cfg.APIKeys {
+				currentKeys[entry.Key] = struct{}{}
+			}
+			nextKeys := make(map[string]struct{}, len(nextCfg.APIKeys))
+			for _, entry := range nextCfg.APIKeys {
+				nextKeys[entry.Key] = struct{}{}
 				if err := store.UpsertClientAPIKey(context.Background(), entry); err != nil {
+					c.JSON(500, gin.H{"error": err.Error()})
+					return
+				}
+			}
+			for key := range currentKeys {
+				if _, exists := nextKeys[key]; exists {
+					continue
+				}
+				if err := store.DeleteClientAPIKey(context.Background(), key); err != nil {
 					c.JSON(500, gin.H{"error": err.Error()})
 					return
 				}
 			}
 		}
 	}
-	h.persist(c)
+	h.applyPersistedConfig(&nextCfg)
+	c.JSON(200, gin.H{"status": "ok"})
 }
 
 func (h *Handler) PatchClientAPIKeys(c *gin.Context) { h.PatchAPIKeys(c) }
